@@ -700,8 +700,11 @@ async def sheet_autocomplete(interaction: discord.Interaction, current: str) -> 
 
 
 async def registration_character_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    sheet_id = getattr(interaction.namespace, "sheet", None)
+    # The interaction namespace uses the renamed Discord option name (Korean)
+    # on some discord.py versions, and the Python parameter name on others.
+    sheet_id = getattr(interaction.namespace, "sheet", None) or getattr(interaction.namespace, "시트", None)
     if not sheet_id:
+        print("Character tab autocomplete skipped: selected sheet was missing from the interaction options.")
         return []
     try:
         choices = await registry.get_character_tab_choices(sheet_id)
@@ -716,7 +719,7 @@ async def registration_character_autocomplete(interaction: discord.Interaction, 
 
 
 async def skill_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    character = getattr(interaction.namespace, "character", None)
+    character = getattr(interaction.namespace, "character", None) or getattr(interaction.namespace, "캐릭터", None)
     if not character:
         return []
     try:

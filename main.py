@@ -14,9 +14,12 @@ from urllib.parse import quote
 
 import aiohttp
 import discord
+from dotenv import load_dotenv
 from discord import app_commands
 from discord.ext import commands
 
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 DISCORD_TOKEN_VARIABLE = "DISCORD_BOT_TOKEN"
 GOOGLE_API_KEY_VARIABLE = "GOOGLE_SHEETS_API_KEY"

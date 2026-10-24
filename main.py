@@ -14,12 +14,35 @@ from urllib.parse import quote
 
 import aiohttp
 import discord
-from dotenv import load_dotenv
 from discord import app_commands
 from discord.ext import commands
 
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+def load_local_env() -> None:
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, separator, value = line.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not separator or not name:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)
+
+
+load_local_env()
 
 DISCORD_TOKEN_VARIABLE = "DISCORD_BOT_TOKEN"
 GOOGLE_API_KEY_VARIABLE = "GOOGLE_SHEETS_API_KEY"

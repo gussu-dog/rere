@@ -157,12 +157,22 @@ class SheetRegistry:
         session = await self._get_session()
         try:
             async with session.get(url, params=params) as response:
-                if response.status == 404:
-                    raise SheetError("문서를 찾을 수 없습니다. 링크와 공개 설정을 확인해 주세요.")
-                if response.status == 403:
-                    raise SheetError("Google Sheets API 요청이 거부됐어요. API 키와 시트 공개 설정을 확인해 주세요!")
+                detail = ""
                 if response.status >= 400:
-                    raise SheetError(f"Google Sheets API 요청에 실패했어요 (HTTP {response.status}). API 키와 Sheets API 설정을 확인해 주세요!")
+                    try:
+                        payload = await response.json(content_type=None)
+                        detail = payload.get("error", {}).get("message", "")
+                    except (ValueError, AttributeError):
+                        pass
+                if response.status == 404:
+                    suffix = f" Google 응답: {detail}" if detail else ""
+                    raise SheetError(f"문서를 찾을 수 없습니다. 링크와 공개 설정을 확인해 주세요.{suffix}")
+                if response.status == 403:
+                    suffix = f" Google 응답: {detail}" if detail else ""
+                    raise SheetError(f"Google Sheets API 요청이 거부됐어요. API 키, Sheets API 사용 설정, 시트 공개 설정을 확인해 주세요!{suffix}")
+                if response.status >= 400:
+                    suffix = f" Google 응답: {detail}" if detail else ""
+                    raise SheetError(f"Google Sheets API 요청에 실패했어요 (HTTP {response.status}). API 키와 Sheets API 설정을 확인해 주세요!{suffix}")
                 return await response.json(content_type=None)
         except SheetError:
             raise
@@ -190,6 +200,7 @@ class SheetRegistry:
                     print(f"Google spreadsheet load failed ({label}, {spreadsheet_id}): {detail}")
                 else:
                     loaded.append(result)
+                    print(f"Google spreadsheet loaded ({label}, {spreadsheet_id}): {len(result.tabs)} tabs")
             if not loaded:
                 details = " / ".join(failures)
                 raise SheetError(f"등록된 Google 시트를 하나도 읽지 못했어요. API 키와 시트 공유 설정을 확인해 주세요. {details}")
@@ -206,6 +217,7 @@ class SheetRegistry:
         sheets = await self.get_available_sheets()
         sheet = next((item for item in sheets if item.spreadsheet_id == spreadsheet_id), None)
         if sheet is None:
+            print(f"Selected spreadsheet is not available from Google API ({spreadsheet_id}).")
             return []
         return [(f"{sheet.spreadsheet_id}|{tab}", trim_choice_name(tab)) for tab in sheet.tabs]
 
@@ -675,8 +687,16 @@ async def character_autocomplete(interaction: discord.Interaction, current: str)
 
 
 async def sheet_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    matches = [(sheet_id, title) for sheet_id, title in registry.get_preconfigured_sheet_choices() if not current or current.casefold() in title.casefold()]
-    return [app_commands.Choice(name=trim_choice_name(title), value=sheet_id) for sheet_id, title in matches[:25]]
+    try:
+        sheets = await registry.get_available_sheets()
+        matches = [(sheet.spreadsheet_id, sheet.title) for sheet in sheets if not current or current.casefold() in sheet.title.casefold()]
+        return [app_commands.Choice(name=trim_choice_name(title), value=sheet_id) for sheet_id, title in matches[:25]]
+    except SheetError as exc:
+        print(f"Spreadsheet autocomplete failed: {exc}")
+        return []
+    except Exception as exc:
+        print(f"Spreadsheet autocomplete failed ({type(exc).__name__}).")
+        return []
 
 
 async def registration_character_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -687,7 +707,11 @@ async def registration_character_autocomplete(interaction: discord.Interaction, 
         choices = await registry.get_character_tab_choices(sheet_id)
         matches = [(value, name) for value, name in choices if not current or current.casefold() in name.casefold()]
         return [app_commands.Choice(name=trim_choice_name(name), value=value) for value, name in matches[:25]]
-    except Exception:
+    except SheetError as exc:
+        print(f"Character tab autocomplete failed for {sheet_id}: {exc}")
+        return []
+    except Exception as exc:
+        print(f"Character tab autocomplete failed for {sheet_id} ({type(exc).__name__}).")
         return []
 
 

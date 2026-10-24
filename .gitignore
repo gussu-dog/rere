@@ -7,3 +7,8 @@ obj/
 *.key
 credentials.json
 client_secret*.json
+__pycache__/
+*.py[cod]
+data/
+.venv/
+venv/

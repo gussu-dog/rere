@@ -228,10 +228,25 @@ class SheetRegistry:
         selected_set = set(selected)
         sheets = await self.get_available_sheets()
         return [
-            (f"{sheet.spreadsheet_id}|{tab}", trim_choice_name(tab))
+            (f"{sheet.title} | {tab}", f"{sheet.title} | {tab}")
             for sheet in sheets for tab in sheet.tabs
             if f"{sheet.spreadsheet_id}|{tab}" in selected_set
         ]
+
+    async def resolve_character_reference(self, character_value: str) -> tuple[str, str] | None:
+        sheet_label, separator, requested_tab = character_value.partition("|")
+        if not separator or not sheet_label.strip() or not requested_tab.strip():
+            return None
+        sheets = await self.get_available_sheets()
+        sheet = next((item for item in sheets if item.spreadsheet_id == sheet_label.strip()), None)
+        if sheet is None:
+            sheet = next((item for item in sheets if item.title.casefold() == sheet_label.strip().casefold()), None)
+        if sheet is None:
+            return None
+        tab = next((name for name in sheet.tabs if name.casefold() == requested_tab.strip().casefold()), None)
+        if tab is None:
+            return None
+        return sheet.spreadsheet_id, tab
 
     async def get_user_character_selection(self, user_id: int) -> list[str] | None:
         async with self._selections_lock:
@@ -289,12 +304,10 @@ class SheetRegistry:
         return f"{data.emote_key}_{outcome}" if "_" in data.emote_key else f"{outcome}_{data.emote_key}"
 
     async def _get_skill_data(self, character_value: str) -> CachedSkillData | None:
-        spreadsheet_id, separator, tab = character_value.partition("|")
-        if not separator or not spreadsheet_id or not tab:
+        resolved = await self.resolve_character_reference(character_value)
+        if resolved is None:
             return None
-        sheets = await self.get_available_sheets()
-        if not any(sheet.spreadsheet_id == spreadsheet_id and tab.casefold() in {name.casefold() for name in sheet.tabs} for sheet in sheets):
-            return None
+        spreadsheet_id, tab = resolved
         if not self.api_key:
             raise SheetError(f"{GOOGLE_API_KEY_VARIABLE} 환경 변수를 찾지 못했어요. 호스팅 환경변수에 키를 등록해 주세요!")
 
@@ -777,7 +790,11 @@ async def observe(interaction: discord.Interaction, character: str) -> None:
         else:
             selected_skill = weighted_choice(candidates)
 
-        sheet_id, _, character_name = character.partition("|")
+        resolved = await registry.resolve_character_reference(character)
+        if resolved is None:
+            await send_response(interaction, "등록된 캐릭터를 시트에서 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요!", ephemeral=True)
+            return
+        sheet_id, character_name = resolved
         other_names = []
         for value, _name in await registry.get_character_tab_choices(sheet_id):
             other_name = value.partition("|")[2]
@@ -833,7 +850,7 @@ async def skill_check(interaction: discord.Interaction, character: str, skill: s
         if skill_value is None:
             await send_response(interaction, "캐릭터나 기능값을 시트에서 찾지 못했어요. `/캐릭터등록`에서 캐릭터를 등록하고 기능 이름을 확인해 주세요!")
             return
-        character_name = character.partition("|")[2] or character
+        character_name = character.partition("|")[2].strip() or character
         mode_label = {"패널티+1": " — 패널티 +1", "패널티+2": " — 패널티 +2", "보너스+1": " — 보너스 +1", "보너스+2": " — 보너스 +2"}.get(mode, "")
         roll_count = 2 if mode in {"패널티+1", "보너스+1"} else 3 if mode in {"패널티+2", "보너스+2"} else 1
         rolls = [random.randint(1, 100) for _ in range(roll_count)]

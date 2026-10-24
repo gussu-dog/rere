@@ -228,7 +228,7 @@ class SheetRegistry:
         selected_set = set(selected)
         sheets = await self.get_available_sheets()
         return [
-            (f"{sheet.title} | {tab}", f"{sheet.title} | {tab}")
+            (f"{short_sheet_title(sheet.title)} | {tab}", f"{short_sheet_title(sheet.title)} | {tab}")
             for sheet in sheets for tab in sheet.tabs
             if f"{sheet.spreadsheet_id}|{tab}" in selected_set
         ]
@@ -240,7 +240,7 @@ class SheetRegistry:
         sheets = await self.get_available_sheets()
         sheet = next((item for item in sheets if item.spreadsheet_id == sheet_label.strip()), None)
         if sheet is None:
-            sheet = next((item for item in sheets if item.title.casefold() == sheet_label.strip().casefold()), None)
+            sheet = next((item for item in sheets if short_sheet_title(item.title).casefold() == sheet_label.strip().casefold()), None)
         if sheet is None:
             return None
         tab = next((name for name in sheet.tabs if name.casefold() == requested_tab.strip().casefold()), None)
@@ -461,6 +461,13 @@ class SheetRegistry:
 
 def trim_choice_name(value: str) -> str:
     return value if len(value) <= 100 else value[:97] + "…"
+
+
+def short_sheet_title(title: str) -> str:
+    words = title.split()
+    if len(words) <= 2:
+        return title
+    return f"{' '.join(words[:2])}..."
 
 
 def parse_int(value: Any) -> int | None:

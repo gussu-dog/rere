@@ -177,10 +177,25 @@ class SheetRegistry:
         async with self._catalog_lock:
             if self._configured_sheets is not None:
                 return self._configured_sheets
-            self._configured_sheets = list(await asyncio.gather(*(
+            results = await asyncio.gather(*(
                 self._read_spreadsheet_metadata(sheet_id)
                 for sheet_id, _ in PRECONFIGURED_SPREADSHEETS
-            )))
+            ), return_exceptions=True)
+            loaded: list[RegisteredSpreadsheet] = []
+            failures: list[str] = []
+            for (spreadsheet_id, label), result in zip(PRECONFIGURED_SPREADSHEETS, results):
+                if isinstance(result, Exception):
+                    detail = str(result) or type(result).__name__
+                    failures.append(f"{label}: {detail}")
+                    print(f"Google spreadsheet load failed ({label}, {spreadsheet_id}): {detail}")
+                else:
+                    loaded.append(result)
+            if not loaded:
+                details = " / ".join(failures)
+                raise SheetError(f"등록된 Google 시트를 하나도 읽지 못했어요. API 키와 시트 공유 설정을 확인해 주세요. {details}")
+            if failures:
+                print(f"Loaded {len(loaded)} of {len(PRECONFIGURED_SPREADSHEETS)} configured Google spreadsheets.")
+            self._configured_sheets = loaded
             return self._configured_sheets
 
     @staticmethod
@@ -965,7 +980,7 @@ async def on_ready() -> None:
         sheets = await registry.get_available_sheets()
         print(f"Loaded {len(sheets)} TRPG spreadsheets.")
     except Exception as exc:
-        print(f"TRPG spreadsheet preload failed ({type(exc).__name__}).")
+        print(f"TRPG spreadsheet preload failed ({type(exc).__name__}): {exc}")
     for guild in bot.guilds:
         try:
             await sync_guild_commands(guild)

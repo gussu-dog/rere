@@ -86,6 +86,13 @@ CHEER_MESSAGES = [
     "오늘도 충분히 잘하고 있어요! 레레가 힘을 보탤게요!",
     "아자~! 레레의 응원으로 기운이 났으면 좋겠어요!",
 ]
+FLAT_WEBHOOK_NAME = "rere-flat-output"
+FLAT_DISPLAY_NAME = "플랫"
+FLAT_CHEER_MESSAGES = [
+    "죄송합니다. 레레 선배는 지금 부재중이십니다. 대신 전해드립니다. 서두르지 말고, 할 수 있는 것부터 천천히 해나가면 괜찮습니다.",
+    "죄송합니다. 레레 선배는 지금 부재중이십니다. 오늘은 작은 일 하나만 해내도 충분합니다. 차근차근 해보시죠.",
+    "죄송합니다. 레레 선배는 지금 부재중이십니다. 지금까지 잘해오셨으니 너무 걱정하지 않으셔도 됩니다.",
+]
 
 FORTUNES = [
     "레레가 봤을 때, 오늘의 당신은 행복할 거예요!",
@@ -111,6 +118,11 @@ FORTUNES = [
     "레레가 봤을 때, 작은 용기를 내면 생각보다 잘 풀릴 거예요!",
     "레레가 봤을 때, 오늘의 실수는 내일을 위한 좋은 경험이 될 거예요!",
     "레레가 봤을 때, 당신 곁에 있는 소중한 것들을 발견하는 날이에요!",
+]
+FLAT_FORTUNE_MESSAGES = [
+    "죄송합니다. 레레 선배는 지금 부재중이십니다. 오늘은 서두르기보다 차분히 살펴보면 좋은 흐름을 발견할 수 있겠습니다.",
+    "죄송합니다. 레레 선배는 지금 부재중이십니다. 오늘은 익숙한 일부터 정리하면 마음이 한결 가벼워질 것 같습니다.",
+    "죄송합니다. 레레 선배는 지금 부재중이십니다. 작은 여유를 두면 뜻밖의 좋은 소식이 찾아올지도 모릅니다.",
 ]
 
 
@@ -706,6 +718,8 @@ intents = discord.Intents.none()
 intents.guilds = True
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 synced_guilds: set[int] = set()
+flat_webhooks: dict[int, discord.Webhook] = {}
+flat_webhook_locks: dict[int, asyncio.Lock] = {}
 
 
 async def send_response(interaction: discord.Interaction, content: str, *, ephemeral: bool = False) -> None:
@@ -713,6 +727,64 @@ async def send_response(interaction: discord.Interaction, content: str, *, ephem
         await interaction.followup.send(content, ephemeral=ephemeral)
     else:
         await interaction.response.send_message(content, ephemeral=ephemeral)
+
+
+async def get_flat_webhook(channel: discord.TextChannel) -> discord.Webhook:
+    lock = flat_webhook_locks.setdefault(channel.id, asyncio.Lock())
+    async with lock:
+        webhook = flat_webhooks.get(channel.id)
+        if webhook is not None:
+            return webhook
+        webhooks = await channel.webhooks()
+        webhook = next((item for item in webhooks if item.name == FLAT_WEBHOOK_NAME), None)
+        if webhook is None:
+            avatar_path = Path(__file__).resolve().parent / "flat.png"
+            avatar = await asyncio.to_thread(avatar_path.read_bytes)
+            webhook = await channel.create_webhook(
+                name=FLAT_WEBHOOK_NAME,
+                avatar=avatar,
+                reason="응원과 운세의 플랫 연출용 웹훅",
+            )
+        flat_webhooks[channel.id] = webhook
+        return webhook
+
+
+async def send_flat_response(interaction: discord.Interaction, content: str) -> bool:
+    channel = interaction.channel
+    thread: discord.Thread | None = None
+    if isinstance(channel, discord.Thread):
+        thread = channel
+        channel = channel.parent
+    if not isinstance(channel, discord.TextChannel) or not interaction.app_permissions.manage_webhooks:
+        return False
+
+    sent = False
+    try:
+        await interaction.response.defer(thinking=True)
+        webhook = await get_flat_webhook(channel)
+        send_options: dict[str, Any] = {"username": FLAT_DISPLAY_NAME, "wait": True}
+        if thread is not None:
+            send_options["thread"] = thread
+        await webhook.send(content, **send_options)
+        sent = True
+    except Exception as exc:
+        flat_webhooks.pop(channel.id, None)
+        print(f"Flat webhook response failed ({type(exc).__name__}).")
+        try:
+            if interaction.response.is_done():
+                await interaction.edit_original_response(content=content)
+            else:
+                await interaction.response.send_message(content)
+        except Exception as fallback_exc:
+            print(f"Flat response fallback failed ({type(fallback_exc).__name__}).")
+        return True
+
+    if sent:
+        try:
+            await interaction.delete_original_response()
+        except Exception as exc:
+            print(f"Deferred interaction cleanup failed ({type(exc).__name__}).")
+    return True
 
 
 async def character_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -858,6 +930,12 @@ def weighted_choice(candidates: list[tuple[str, int]]) -> str:
 
 @bot.tree.command(name="응원", description="레레가 응원할게요!")
 async def cheer(interaction: discord.Interaction) -> None:
+    if random.random() < 0.10:
+        message = random.choice(FLAT_CHEER_MESSAGES)
+        if await send_flat_response(interaction, message):
+            return
+        await send_response(interaction, message)
+        return
     await send_response(interaction, random.choice(CHEER_MESSAGES))
 
 
@@ -973,6 +1051,12 @@ async def secret_roll_dice(interaction: discord.Interaction, expression: str) ->
 
 @bot.tree.command(name="운세", description="오늘의 운세")
 async def fortune(interaction: discord.Interaction) -> None:
+    if random.random() < 0.10:
+        message = random.choice(FLAT_FORTUNE_MESSAGES)
+        if await send_flat_response(interaction, message):
+            return
+        await send_response(interaction, message)
+        return
     await send_response(interaction, random.choice(FORTUNES))
 
 

@@ -87,6 +87,35 @@ public class CommandsModule : InteractionModuleBase<SocketInteractionContext>
             await RespondAsync("이 캐릭터의 기능치를 찾지 못했어요. 시트에 기능치가 있는지 확인해 주세요!", ephemeral: true);
             return;
         }
+        var separator = 캐릭터.IndexOf('|');
+        var characterName = separator >= 0 ? 캐릭터[(separator + 1)..].Trim() : 캐릭터;
+        if (Random.Shared.Next(100) < 30)
+        {
+            var restActivities = new (string Action, string Reaction)[]
+            {
+                ("잠시 자리에 앉아 쉬고 있었어요!", "잠깐 쉬어가는 것도 좋지요. 레레도 옆에서 조용히 있을게요!"),
+                ("따뜻한 차를 마시며 여유를 즐기고 있었어요!", "따뜻한 차 한 잔은 마음까지 편안하게 해줘요!"),
+                ("짧게 낮잠을 자고 있었어요!", "푹 쉬고 나면 한결 개운할 거예요!"),
+                ("간단한 간식을 먹으며 쉬고 있었어요!", "맛있는 간식은 기운을 북돋아 주지요!"),
+                ("물을 마시며 잠시 숨을 고르고 있었어요!", "수분 보충도 잊지 않았네요!"),
+                ("창가에 앉아 바깥 풍경을 바라보고 있었어요!", "잠시 멍하니 바라보는 시간도 좋네요!"),
+                ("편안한 음악을 들으며 쉬고 있었어요!", "음악을 들으니 마음이 차분해져요!"),
+                ("가볍게 스트레칭하며 몸을 풀고 있었어요!", "몸을 쭉 펴면 개운하지요!"),
+                ("읽던 책을 펼쳐놓고 느긋하게 읽고 있었어요!", "여유로운 독서 시간, 참 좋네요!"),
+                ("담요를 두르고 포근하게 쉬고 있었어요!", "따뜻하고 편안해 보여요!"),
+                ("창문을 열어 산뜻한 바람을 쐬고 있었어요!", "바람이 기분 전환에 도움이 되겠어요!"),
+                ("따뜻한 우유를 마시며 잠시 쉬고 있었어요!", "마음이 몽글몽글해지는 시간이네요!"),
+                ("간단히 식사를 하며 에너지를 채우고 있었어요!", "든든하게 챙겨 먹으면 힘이 나지요!"),
+                ("햇볕이 드는 곳에 앉아 잠깐 눈을 감고 있었어요!", "햇살이 포근하게 감싸주는 것 같아요!"),
+                ("좋아하는 노래를 작게 흥얼거리며 쉬고 있었어요!", "콧노래가 들리니 레레도 기분이 좋아져요!")
+            };
+            var rest = restActivities[Random.Shared.Next(restActivities.Length)];
+            await RespondAsync(
+                $"레레가 살짝 보고 왔는데, **{characterName}**{ObservationActivities.TopicParticle(characterName)} {rest.Action} {rest.Reaction}",
+                ephemeral: false);
+            return;
+        }
+
         string selectedSkill;
         if (투자값들 is not null)
         {
@@ -112,8 +141,6 @@ public class CommandsModule : InteractionModuleBase<SocketInteractionContext>
         else
             selectedSkill = PickWeightedSkill(candidates.Select(candidate => (candidate.Skill, candidate.Weight)).ToArray());
 
-        var separator = 캐릭터.IndexOf('|');
-        var characterName = separator >= 0 ? 캐릭터[(separator + 1)..].Trim() : 캐릭터;
         var otherCharacterNames = new List<string>();
         if (separator > 0)
         {

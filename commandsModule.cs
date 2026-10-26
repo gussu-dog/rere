@@ -133,12 +133,12 @@ public class CommandsModule : InteractionModuleBase<SocketInteractionContext>
             {
                 var restInteractions = new (string Action, string Reaction)[]
                 {
-                    ("[[RERE_PARTNER_COMITATIVE]] 나란히 앉아 차를 마시며 쉬고 있었어요!", "두 사람 모두 잠깐 쉬고 있네요!"),
-                    ("[[RERE_PARTNER_DATIVE]] 간식을 하나 건네고 있었어요!", "간식을 하나 나누고 있네요!"),
-                    ("[[RERE_PARTNER_COMITATIVE]] 창밖 풍경을 바라보며 쉬고 있었어요!", "같은 풍경을 바라보고 있네요!"),
-                    ("[[RERE_PARTNER_COMITATIVE]] 조용히 음악을 들으며 쉬고 있었어요!", "음악 소리가 잔잔하게 들려요!"),
-                    ("[[RERE_PARTNER_GENITIVE]] 옆에서 각자 책을 읽으며 쉬고 있었어요!", "각자 책을 읽으며 조용히 쉬고 있네요!"),
-                    ("[[RERE_PARTNER_COMITATIVE]] 가볍게 스트레칭하며 몸을 풀고 있었어요!", "나란히 몸을 풀고 있네요!")
+                    ("[[RERE_PARTNER_COMITATIVE]] 나란히 앉아 차를 마시며 쉬고 있었어요!", "차 향이 은은하게 퍼지네요!"),
+                    ("[[RERE_PARTNER_DATIVE]] 간식을 하나 건네고 있었어요!", "간식을 나눠주다니, 상냥해요!"),
+                    ("[[RERE_PARTNER_COMITATIVE]] 창밖 풍경을 바라보며 쉬고 있었어요!", "바깥 풍경이 평화로워 보여요!"),
+                    ("[[RERE_PARTNER_COMITATIVE]] 조용히 음악을 들으며 쉬고 있었어요!", "잔잔한 곡이라 쉬는 분위기와 잘 어울려요!"),
+                    ("[[RERE_PARTNER_GENITIVE]] 옆에서 각자 책을 읽으며 쉬고 있었어요!", "책장이 넘어가는 소리만 들려서 차분하네요!"),
+                    ("[[RERE_PARTNER_COMITATIVE]] 가볍게 스트레칭하며 몸을 풀고 있었어요!", "몸을 풀어주면 한결 개운하겠어요!")
                 };
                 var partnerName = restOtherCharacterNames[Random.Shared.Next(restOtherCharacterNames.Count)];
                 var selected = restInteractions[Random.Shared.Next(restInteractions.Length)];

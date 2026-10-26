@@ -93,25 +93,69 @@ public class CommandsModule : InteractionModuleBase<SocketInteractionContext>
         {
             var restActivities = new (string Action, string Reaction)[]
             {
-                ("잠시 자리에 앉아 쉬고 있었어요!", "잠깐 쉬어가는 것도 좋지요. 레레도 옆에서 조용히 있을게요!"),
+                ("잠시 자리에 앉아 쉬고 있었어요!", "잠깐 쉬어가는 것도 좋죠!"),
                 ("따뜻한 차를 마시며 여유를 즐기고 있었어요!", "따뜻한 차 한 잔은 마음까지 편안하게 해줘요!"),
                 ("짧게 낮잠을 자고 있었어요!", "푹 쉬고 나면 한결 개운할 거예요!"),
-                ("간단한 간식을 먹으며 쉬고 있었어요!", "맛있는 간식은 기운을 북돋아 주지요!"),
+                ("간단한 간식을 먹으며 쉬고 있었어요!", "맛있는 간식은 기운을 북돋아 줘요!"),
                 ("물을 마시며 잠시 숨을 고르고 있었어요!", "수분 보충도 잊지 않았네요!"),
                 ("창가에 앉아 바깥 풍경을 바라보고 있었어요!", "잠시 멍하니 바라보는 시간도 좋네요!"),
-                ("편안한 음악을 들으며 쉬고 있었어요!", "음악을 들으니 마음이 차분해져요!"),
-                ("가볍게 스트레칭하며 몸을 풀고 있었어요!", "몸을 쭉 펴면 개운하지요!"),
+                ("음악을 들으며 쉬고 있었어요!", "무슨 음악을 듣고 있는 걸까요?"),
+                ("가볍게 스트레칭하며 몸을 풀고 있었어요!", "와아, 레레도 같이 스트레칭해보고 싶어요!"),
                 ("읽던 책을 펼쳐놓고 느긋하게 읽고 있었어요!", "여유로운 독서 시간, 참 좋네요!"),
-                ("담요를 두르고 포근하게 쉬고 있었어요!", "따뜻하고 편안해 보여요!"),
-                ("창문을 열어 산뜻한 바람을 쐬고 있었어요!", "바람이 기분 전환에 도움이 되겠어요!"),
+                ("담요를 덮고 포근하게 쉬고 있었어요!", "따뜻하고 편안해 보여요!"),
+                ("창문을 열어 산뜻한 바람을 쐬고 있었어요!", "바람이 살랑살랑 불어서 기분이 좋아 보여요!"),
                 ("따뜻한 우유를 마시며 잠시 쉬고 있었어요!", "마음이 몽글몽글해지는 시간이네요!"),
-                ("간단히 식사를 하며 에너지를 채우고 있었어요!", "든든하게 챙겨 먹으면 힘이 나지요!"),
+                ("간단히 식사를 하며 에너지를 채우고 있었어요!", "레레는 모르지만, 든든하게 챙겨 먹으면 힘이 난대요!"),
                 ("햇볕이 드는 곳에 앉아 잠깐 눈을 감고 있었어요!", "햇살이 포근하게 감싸주는 것 같아요!"),
-                ("좋아하는 노래를 작게 흥얼거리며 쉬고 있었어요!", "콧노래가 들리니 레레도 기분이 좋아져요!")
+                ("좋아하는 노래를 작게 흥얼거리며 쉬고 있었어요!", "좋아하는 노래인가 봐요!")
             };
-            var rest = restActivities[Random.Shared.Next(restActivities.Length)];
+            var restAction = string.Empty;
+            var restReaction = string.Empty;
+            var restOtherCharacterNames = new List<string>();
+            if (separator > 0)
+            {
+                try
+                {
+                    var sameSheetCharacters = await _sheetRegistry.GetCharacterTabChoicesAsync(캐릭터[..separator]);
+                    restOtherCharacterNames = sameSheetCharacters
+                        .Select(choice => choice.Value[(choice.Value.IndexOf('|') + 1)..])
+                        .Where(name => !string.Equals(name, characterName, StringComparison.OrdinalIgnoreCase))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Observation rest character lookup failed ({ex.GetType().Name}).");
+                }
+            }
+
+            if (restOtherCharacterNames.Count > 0 && Random.Shared.Next(3) == 0)
+            {
+                var restInteractions = new (string Action, string Reaction)[]
+                {
+                    ("[[RERE_PARTNER_COMITATIVE]] 나란히 앉아 차를 마시며 쉬고 있었어요!", "두 사람 모두 잠깐 쉬고 있네요!"),
+                    ("[[RERE_PARTNER_DATIVE]] 간식을 하나 건네고 있었어요!", "간식을 하나 나누고 있네요!"),
+                    ("[[RERE_PARTNER_COMITATIVE]] 창밖 풍경을 바라보며 쉬고 있었어요!", "같은 풍경을 바라보고 있네요!"),
+                    ("[[RERE_PARTNER_COMITATIVE]] 조용히 음악을 들으며 쉬고 있었어요!", "음악 소리가 잔잔하게 들려요!"),
+                    ("[[RERE_PARTNER_GENITIVE]] 옆에서 각자 책을 읽으며 쉬고 있었어요!", "각자 책을 읽으며 조용히 쉬고 있네요!"),
+                    ("[[RERE_PARTNER_COMITATIVE]] 가볍게 스트레칭하며 몸을 풀고 있었어요!", "나란히 몸을 풀고 있네요!")
+                };
+                var partnerName = restOtherCharacterNames[Random.Shared.Next(restOtherCharacterNames.Count)];
+                var selected = restInteractions[Random.Shared.Next(restInteractions.Length)];
+                var interaction = ObservationActivities.Personalize(
+                    new ObservationActivity(selected.Action, selected.Reaction), characterName, partnerName);
+                restAction = interaction.Action;
+                restReaction = interaction.RereReaction;
+            }
+            else
+            {
+                var rest = restActivities[Random.Shared.Next(restActivities.Length)];
+                restAction = rest.Action;
+                restReaction = rest.Reaction;
+            }
+
             await RespondAsync(
-                $"레레가 살짝 보고 왔는데, **{characterName}**{ObservationActivities.TopicParticle(characterName)} {rest.Action} {rest.Reaction}",
+                $"레레가 살짝 보고 왔는데, **{characterName}**{ObservationActivities.TopicParticle(characterName)} {restAction} {restReaction}",
                 ephemeral: false);
             return;
         }

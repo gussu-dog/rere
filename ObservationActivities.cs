@@ -283,10 +283,12 @@ public static class ObservationActivities
         return Personalize(fallback[Random.Shared.Next(fallback.Length)], characterName);
     }
 
-    private static ObservationActivity Personalize(ObservationActivity activity, string characterName, string? partnerName = null) =>
+    public static ObservationActivity Personalize(ObservationActivity activity, string characterName, string? partnerName = null) =>
         new(
             activity.Action
                 .Replace("[[RERE_CHARACTER_NAME]]", characterName, StringComparison.Ordinal)
+                .Replace("[[RERE_PARTNER_COMITATIVE]]", WithParticle(partnerName ?? string.Empty, "와", "과"), StringComparison.Ordinal)
+                .Replace("[[RERE_PARTNER_DATIVE]]", (partnerName ?? string.Empty) + "에게", StringComparison.Ordinal)
                 .Replace("[[RERE_PARTNER_OBJECT]]", WithParticle(partnerName ?? string.Empty, "를", "을"), StringComparison.Ordinal)
                 .Replace("[[RERE_PARTNER_GENITIVE]]", (partnerName ?? string.Empty) + "의", StringComparison.Ordinal),
             activity.RereReaction

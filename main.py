@@ -127,21 +127,29 @@ FORTUNES = [
     "레레가 봤을 때, 당신 곁에 있는 소중한 것들을 발견하는 날이에요!",
 ]
 OBSERVATION_REST_ACTIVITIES = [
-    ("잠시 자리에 앉아 쉬고 있었어요!", "잠깐 쉬어가는 것도 좋지요. 레레도 옆에서 조용히 있을게요!"),
+    ("잠시 자리에 앉아 쉬고 있었어요!", "잠깐 쉬어가는 것도 좋죠!"),
     ("따뜻한 차를 마시며 여유를 즐기고 있었어요!", "따뜻한 차 한 잔은 마음까지 편안하게 해줘요!"),
     ("짧게 낮잠을 자고 있었어요!", "푹 쉬고 나면 한결 개운할 거예요!"),
-    ("간단한 간식을 먹으며 쉬고 있었어요!", "맛있는 간식은 기운을 북돋아 주지요!"),
+    ("간단한 간식을 먹으며 쉬고 있었어요!", "맛있는 간식은 기운을 북돋아 줘요!"),
     ("물을 마시며 잠시 숨을 고르고 있었어요!", "수분 보충도 잊지 않았네요!"),
     ("창가에 앉아 바깥 풍경을 바라보고 있었어요!", "잠시 멍하니 바라보는 시간도 좋네요!"),
-    ("편안한 음악을 들으며 쉬고 있었어요!", "음악을 들으니 마음이 차분해져요!"),
-    ("가볍게 스트레칭하며 몸을 풀고 있었어요!", "몸을 쭉 펴면 개운하지요!"),
-    ("읽던 책을 펼쳐놓고 느긋하게 읽고 있었어요!", "여유로운 독서 시간, 참 좋네요!"),
-    ("담요를 두르고 포근하게 쉬고 있었어요!", "따뜻하고 편안해 보여요!"),
-    ("창문을 열어 산뜻한 바람을 쐬고 있었어요!", "바람이 기분 전환에 도움이 되겠어요!"),
+    ("음악을 들으며 쉬고 있었어요!", "무슨 음악을 듣고 있는 걸까요?"),
+    ("가볍게 스트레칭하며 몸을 풀고 있었어요!", "와아, 레레도 같이 스트레칭해보고 싶어요!"),
+    ("읽던 책을 펼쳐놓고 느긋하게 읽고 있었어요!", "여유로운 독서 시간, 참 좋아요!"),
+    ("담요를 덮고 포근하게 쉬고 있었어요!", "따뜻하고 편안해 보여요!"),
+    ("창문을 열어 산뜻한 바람을 쐬고 있었어요!", "바람이 살랑살랑 불어서 기분이 좋아 보여요!"),
     ("따뜻한 우유를 마시며 잠시 쉬고 있었어요!", "마음이 몽글몽글해지는 시간이네요!"),
-    ("간단히 식사를 하며 에너지를 채우고 있었어요!", "든든하게 챙겨 먹으면 힘이 나지요!"),
+    ("간단히 식사를 하며 에너지를 채우고 있었어요!", "레레는 모르지만, 든든하게 챙겨 먹으면 힘이 난대요!"),
     ("햇볕이 드는 곳에 앉아 잠깐 눈을 감고 있었어요!", "햇살이 포근하게 감싸주는 것 같아요!"),
-    ("좋아하는 노래를 작게 흥얼거리며 쉬고 있었어요!", "콧노래가 들리니 레레도 기분이 좋아져요!"),
+    ("좋아하는 노래를 작게 흥얼거리며 쉬고 있었어요!", "좋아하는 노래인가 봐요!"),
+]
+OBSERVATION_REST_WITH_OTHER = [
+    ("[[RERE_PARTNER_COMITATIVE]] 나란히 앉아 차를 마시며 쉬고 있었어요!", "두 사람 모두 잠깐 쉬고 있네요!"),
+    ("[[RERE_PARTNER_DATIVE]] 간식을 하나 건네고 있었어요!", "간식을 하나 나누고 있네요!"),
+    ("[[RERE_PARTNER_COMITATIVE]] 창밖 풍경을 바라보며 쉬고 있었어요!", "같은 풍경을 바라보고 있네요!"),
+    ("[[RERE_PARTNER_COMITATIVE]] 조용히 음악을 들으며 쉬고 있었어요!", "음악 소리가 잔잔하게 들려요!"),
+    ("[[RERE_PARTNER_GENITIVE]] 옆에서 각자 책을 읽으며 쉬고 있었어요!", "각자 책을 읽으며 조용히 쉬고 있네요!"),
+    ("[[RERE_PARTNER_COMITATIVE]] 가볍게 스트레칭하며 몸을 풀고 있었어요!", "나란히 몸을 풀고 있네요!"),
 ]
 FLAT_FORTUNE_MESSAGES = [
     "잠시 레레 선배가 바빠서 제가 대신 전해드립니다. 오늘은 서두르기보다 차분히 살펴보면 좋은 흐름을 발견할 수 있겠습니다.",
@@ -584,6 +592,8 @@ def personalize_activity(activity: list[str], character_name: str, partner_name:
     partner = partner_name or ""
     replacements = {
         "[[RERE_CHARACTER_NAME]]": character_name,
+        "[[RERE_PARTNER_COMITATIVE]]": with_particle(partner, "와", "과"),
+        "[[RERE_PARTNER_DATIVE]]": partner + "에게",
         "[[RERE_PARTNER_OBJECT]]": with_particle(partner, "를", "을"),
         "[[RERE_PARTNER_GENITIVE]]": partner + "의",
         "[[RERE_PARTNER_NAME]]": partner,
@@ -914,6 +924,20 @@ async def observe(interaction: discord.Interaction, character: str) -> None:
 
         if random.random() < 0.30:
             activity, reaction = random.choice(OBSERVATION_REST_ACTIVITIES)
+            try:
+                same_sheet = await registry.get_character_tab_choices(_sheet_id)
+                other_names = [
+                    value.partition("|")[2].strip()
+                    for value, _label in same_sheet
+                    if value.partition("|")[2].strip().casefold() != character_name.casefold()
+                ]
+                if other_names and random.randrange(3) == 0:
+                    partner = random.choice(other_names)
+                    activity, reaction = personalize_activity(
+                        random.choice(OBSERVATION_REST_WITH_OTHER), character_name, partner
+                    )
+            except Exception as exc:
+                print(f"Observation rest character lookup failed ({type(exc).__name__}).")
             await send_response(
                 interaction,
                 f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} {activity} {reaction}",

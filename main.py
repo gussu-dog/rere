@@ -316,7 +316,10 @@ class SheetRegistry:
         if not data or not data.emote_key:
             return None
         outcome = "P" if succeeded else "N"
-        return f"{data.emote_key}_{outcome}" if "_" in data.emote_key else f"{outcome}_{data.emote_key}"
+        sheet_marker, separator, character_marker = data.emote_key.partition("_")
+        if separator and character_marker:
+            return f"{sheet_marker}_{outcome}_{character_marker}"
+        return f"{outcome}_{sheet_marker}"
 
     async def _get_skill_data(self, character_value: str) -> CachedSkillData | None:
         resolved = await self.resolve_character_reference(character_value)

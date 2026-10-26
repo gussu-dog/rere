@@ -769,7 +769,7 @@ async def send_flat_response(interaction: discord.Interaction, content: str) -> 
     if isinstance(channel, discord.Thread):
         thread = channel
         channel = channel.parent
-    if not isinstance(channel, discord.TextChannel) or not interaction.app_permissions.manage_webhooks:
+    if not isinstance(channel, discord.TextChannel):
         return False
 
     sent = False
@@ -783,7 +783,13 @@ async def send_flat_response(interaction: discord.Interaction, content: str) -> 
         sent = True
     except Exception as exc:
         flat_webhooks.pop(channel.id, None)
-        print(f"Flat webhook response failed ({type(exc).__name__}).")
+        app_manage_webhooks = getattr(interaction.app_permissions, "manage_webhooks", None)
+        status = getattr(exc, "status", None)
+        code = getattr(exc, "code", None)
+        print(
+            f"Flat webhook response failed ({type(exc).__name__}; HTTP {status}; code {code}; "
+            f"app_manage_webhooks={app_manage_webhooks}; channel={channel.id})."
+        )
         try:
             if interaction.response.is_done():
                 await interaction.edit_original_response(content=content)

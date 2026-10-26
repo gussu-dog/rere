@@ -1059,6 +1059,12 @@ async def choose(interaction: discord.Interaction, items: str) -> None:
     if len(choices) < 2:
         await send_response(interaction, "쉼표로 나눠서 선택지를 두 개 이상 입력해 주세요! 예: `빨강, 파랑, 초록`", ephemeral=True)
         return
+    if random.random() < 0.05:
+        message = "제가 대신 말씀드리겠습니다. 선택지가 전부 마음에 들지 않는군요. 다시 시도해주십시오."
+        if await send_flat_response(interaction, message):
+            return
+        await send_response(interaction, message)
+        return
     await send_response(interaction, f"레레가 고른 건,  **[{random.choice(choices)}]** 예요!")
 
 

@@ -181,6 +181,7 @@ class CachedSkillData:
     values: dict[str, int]
     invested_points: dict[str, int] | None
     emote_key: str | None
+    occupation: str | None
     expires_at: float
 
 
@@ -392,9 +393,9 @@ class SheetRegistry:
             escaped_tab = tab.replace("'", "''")
             use_sorted_table = spreadsheet_id == SORTED_TABLE_SPREADSHEET_ID
             ranges = (
-                [f"'{escaped_tab}'!A1", f"'{escaped_tab}'!B129:M200", f"'{escaped_tab}'!O21:AL27", f"'{escaped_tab}'!AE12"]
+                [f"'{escaped_tab}'!A1:AN18", f"'{escaped_tab}'!B129:M200", f"'{escaped_tab}'!O21:AL27", f"'{escaped_tab}'!AE12"]
                 if use_sorted_table else
-                [f"'{escaped_tab}'!A1", f"'{escaped_tab}'!S3:AH7", f"'{escaped_tab}'!C19:N80", f"'{escaped_tab}'!P19:AA80", f"'{escaped_tab}'!AC19:AN80", f"'{escaped_tab}'!AE9"]
+                [f"'{escaped_tab}'!A1:AN18", f"'{escaped_tab}'!S3:AH7", f"'{escaped_tab}'!C19:N80", f"'{escaped_tab}'!P19:AA80", f"'{escaped_tab}'!AC19:AN80", f"'{escaped_tab}'!AE9"]
             )
             url = f"https://sheets.googleapis.com/v4/spreadsheets/{quote(spreadsheet_id, safe='')}/values:batchGet"
             params = [("valueRenderOption", "FORMATTED_VALUE"), *(('ranges', item) for item in ranges), ("key", self.api_key)]
@@ -409,7 +410,8 @@ class SheetRegistry:
             if sanity_value is not None and not has_casefold_key(values, "이성"):
                 values["이성"] = sanity_value
             emote_key = self._parse_emote_key(value_ranges)
-            cached = CachedSkillData(values, invested_points, emote_key, time.monotonic() + 60)
+            occupation = self._parse_occupation(value_ranges)
+            cached = CachedSkillData(values, invested_points, emote_key, occupation, time.monotonic() + 60)
             self._skill_cache[cache_key] = cached
             return cached
 
@@ -447,6 +449,26 @@ class SheetRegistry:
         if len(key) > 30 or not re.fullmatch(r"[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*", key):
             return None
         return key or None
+
+    @classmethod
+    def _parse_occupation(cls, value_ranges: list[dict[str, Any]]) -> str | None:
+        rows = cls._range_rows(value_ranges, 0)
+        metadata_labels = {"이름", "캐릭터 이름", "성별", "나이", "연령", "직업", "거주지", "출신지", "생년월일"}
+        for row_index, row in enumerate(rows):
+            for column_index, cell in enumerate(row):
+                label = cell.strip().rstrip(":：").casefold()
+                if label not in {"직업", "직업명", "occupation"}:
+                    continue
+                for candidate in row[column_index + 1:]:
+                    candidate = candidate.strip()
+                    if candidate and candidate.rstrip(":：").casefold() not in metadata_labels:
+                        return candidate
+                for next_row in rows[row_index + 1:row_index + 4]:
+                    if column_index < len(next_row):
+                        candidate = next_row[column_index].strip()
+                        if candidate and candidate.rstrip(":：").casefold() not in metadata_labels:
+                            return candidate
+        return None
 
     @classmethod
     def _parse_sanity_value(cls, value_ranges: list[dict[str, Any]]) -> int | None:
@@ -947,6 +969,13 @@ async def observe(interaction: discord.Interaction, character: str) -> None:
         data = await registry._get_skill_data(character)
         if not data or not data.values:
             await send_response(interaction, "시트에서 캐릭터의 기능치를 찾지 못했어요. 캐릭터 등록과 시트 내용을 확인해 주세요!")
+            return
+        if data.occupation and random.random() < 0.10:
+            await send_response(
+                interaction,
+                f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} {data.occupation} 일을 하고 있었어요! "
+                "집중하는 모습이 눈에 들어오네요!",
+            )
             return
         candidates = []
         for skill, value in data.values.items():

@@ -183,6 +183,12 @@ public sealed class SheetRegistry
         return data?.Values;
     }
 
+    public async Task<string?> GetOccupationAsync(string characterValue)
+    {
+        var data = await GetSkillDataAsync(characterValue);
+        return data?.Occupation;
+    }
+
     public async Task<IReadOnlyDictionary<string, int>?> GetSkillInvestmentValuesAsync(string characterValue)
     {
         var data = await GetSkillDataAsync(characterValue);
@@ -249,8 +255,8 @@ public sealed class SheetRegistry
             var escapedTab = tab.Replace("'", "''");
             var usesSortedTable = spreadsheetId == SortedTableSpreadsheetId;
             var ranges = usesSortedTable
-                ? new[] { $"'{escapedTab}'!A1", $"'{escapedTab}'!B129:M200", $"'{escapedTab}'!O21:AL27", $"'{escapedTab}'!AE12" }
-                : new[] { $"'{escapedTab}'!A1", $"'{escapedTab}'!S3:AH7", $"'{escapedTab}'!C19:N80", $"'{escapedTab}'!P19:AA80", $"'{escapedTab}'!AC19:AN80", $"'{escapedTab}'!AE9" };
+                ? new[] { $"'{escapedTab}'!A1:AN18", $"'{escapedTab}'!B129:M200", $"'{escapedTab}'!O21:AL27", $"'{escapedTab}'!AE12" }
+                : new[] { $"'{escapedTab}'!A1:AN18", $"'{escapedTab}'!S3:AH7", $"'{escapedTab}'!C19:N80", $"'{escapedTab}'!P19:AA80", $"'{escapedTab}'!AC19:AN80", $"'{escapedTab}'!AE9" };
             var requestUrl = $"https://sheets.googleapis.com/v4/spreadsheets/{Uri.EscapeDataString(spreadsheetId)}/values:batchGet?valueRenderOption=FORMATTED_VALUE" +
                 string.Concat(ranges.Select(range => $"&ranges={Uri.EscapeDataString(range)}")) +
                 $"&key={Uri.EscapeDataString(_apiKey)}";
@@ -269,10 +275,11 @@ public sealed class SheetRegistry
             foreach (var characteristic in ParseCharacteristicValues(document.RootElement, usesSortedTable))
                 values.TryAdd(characteristic.Key, characteristic.Value);
             var emoteKey = ParseCharacterEmoteKey(document.RootElement);
+            var occupation = ParseOccupation(document.RootElement);
             var sanityValue = ParseSanityValue(document.RootElement);
             if (sanityValue is not null)
                 values.TryAdd("이성", sanityValue.Value);
-            cached = new CachedSkillData(values, investedPoints, emoteKey, DateTimeOffset.UtcNow.AddMinutes(1));
+            cached = new CachedSkillData(values, investedPoints, emoteKey, occupation, DateTimeOffset.UtcNow.AddMinutes(1));
             _skillCache[key] = cached;
             return cached;
         }
@@ -300,6 +307,45 @@ public sealed class SheetRegistry
             return null;
 
         return key;
+    }
+
+    private static string? ParseOccupation(JsonElement root)
+    {
+        if (!root.TryGetProperty("valueRanges", out var ranges) || ranges.GetArrayLength() == 0 ||
+            !ranges[0].TryGetProperty("values", out var rows))
+            return null;
+
+        var metadataLabels = new HashSet<string>(new[] { "이름", "캐릭터 이름", "성별", "나이", "연령", "직업", "거주지", "출신지", "생년월일" }, StringComparer.OrdinalIgnoreCase);
+        var rowList = rows.EnumerateArray()
+            .Select(row => row.EnumerateArray().Select(cell => cell.ToString().Trim()).ToList())
+            .ToList();
+        for (var rowIndex = 0; rowIndex < rowList.Count; rowIndex++)
+        {
+            var row = rowList[rowIndex];
+            for (var columnIndex = 0; columnIndex < row.Count; columnIndex++)
+            {
+                var label = row[columnIndex].TrimEnd(':', '：');
+                if (!label.Equals("직업", StringComparison.OrdinalIgnoreCase) &&
+                    !label.Equals("직업명", StringComparison.OrdinalIgnoreCase) &&
+                    !label.Equals("occupation", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                foreach (var candidate in row.Skip(columnIndex + 1))
+                {
+                    var value = candidate.Trim();
+                    if (!string.IsNullOrWhiteSpace(value) && !metadataLabels.Contains(value.TrimEnd(':', '：')))
+                        return value;
+                }
+                foreach (var nextRow in rowList.Skip(rowIndex + 1).Take(3))
+                {
+                    if (columnIndex >= nextRow.Count) continue;
+                    var value = nextRow[columnIndex].Trim();
+                    if (!string.IsNullOrWhiteSpace(value) && !metadataLabels.Contains(value.TrimEnd(':', '：')))
+                        return value;
+                }
+            }
+        }
+        return null;
     }
 
     private static int? ParseSanityValue(JsonElement root)
@@ -528,5 +574,5 @@ public sealed class SheetRegistry
 }
 
 public sealed record RegisteredSpreadsheet(string SpreadsheetId, string Title, List<string> Tabs);
-internal sealed record CachedSkillData(Dictionary<string, int> Values, Dictionary<string, int>? InvestedPoints, string? EmoteKey, DateTimeOffset ExpiresAt);
+internal sealed record CachedSkillData(Dictionary<string, int> Values, Dictionary<string, int>? InvestedPoints, string? EmoteKey, string? Occupation, DateTimeOffset ExpiresAt);
 

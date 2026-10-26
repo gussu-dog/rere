@@ -160,6 +160,15 @@ public class CommandsModule : InteractionModuleBase<SocketInteractionContext>
             return;
         }
 
+        var occupation = await _sheetRegistry.GetOccupationAsync(캐릭터);
+        if (!string.IsNullOrWhiteSpace(occupation) && Random.Shared.Next(10) == 0)
+        {
+            await RespondAsync(
+                $"레레가 살짝 보고 왔는데, **{characterName}**{ObservationActivities.TopicParticle(characterName)} {occupation} 일을 하고 있었어요! 집중하는 모습이 눈에 들어오네요!",
+                ephemeral: false);
+            return;
+        }
+
         string selectedSkill;
         if (투자값들 is not null)
         {

@@ -596,9 +596,16 @@ class ObservationActivities:
         if activity_name in cls.by_skill:
             return personalize_activity(random.choice(cls.by_skill[activity_name]), character_name)
         fallback = [
-            [f"{skill}과 관련된 메모를 정리하며 다음에 해볼 일을 생각하고 있어요.", "[[RERE_CHARACTER_NAME]]은 여러 가지에 관심이 많네요!"],
-            [f"잠깐 시간을 내어 {skill}을(를) 연습하고 있어요.", "레레도 옆에서 같이 보고 싶어요!"],
-            [f"필요한 도구를 챙겨 {skill}을(를) 준비하고 있어요.", "레레가 필요한 걸 가져다줄게요!"],
+            [f"{skill} 관련 메모를 정리하며 다음에 해볼 일을 생각하고 있어요.", "관심사가 다양하네요!"],
+            [f"잠깐 시간을 내어 {with_particle(skill, '을', '를')} 연습하고 있어요.", "차근차근 준비하고 있네요!"],
+            [f"{skill} 연습에 필요한 것들을 미리 챙기고 있어요.", "준비성이 참 좋네요!"],
+            [f"{skill} 관련 자료를 살펴보고 기억할 내용을 적어두고 있어요.", "메모해두면 나중에 도움이 되겠어요!"],
+            [f"전에 적어둔 내용을 다시 읽으며 익숙한 부분을 정리하고 있어요.", "꼼꼼히 살펴보는 모습이 멋져요!"],
+            [f"{skill}에서 헷갈렸던 부분을 찾아보고 메모하고 있어요.", "조금씩 익숙해지는 게 느껴져요!"],
+            [f"관련 기록을 훑어보며 빠진 내용이 없는지 확인하고 있어요.", "정리해두니 한결 보기 편하겠어요!"],
+            [f"{skill}에 관한 기본 내용을 천천히 되짚어보고 있어요.", "꾸준히 해보는 모습이 보기 좋아요!"],
+            [f"필요한 순서를 생각하며 {with_particle(skill, '을', '를')} 차근차근 연습하고 있어요.", "서두르지 않고 살펴보는 게 좋네요!"],
+            [f"{skill} 관련 자료에서 새로 알게 된 점을 짧게 적어두고 있어요.", "새로운 걸 알아가는 건 즐거워요!"],
         ]
         return personalize_activity(random.choice(fallback), character_name)
 

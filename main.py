@@ -743,7 +743,9 @@ async def send_response(interaction: discord.Interaction, content: str, *, ephem
         await interaction.response.send_message(content, ephemeral=ephemeral)
 
 
-async def get_flat_webhook(channel: discord.TextChannel | discord.ForumChannel | discord.VoiceChannel) -> discord.Webhook:
+async def get_flat_webhook(
+    channel: discord.TextChannel | discord.ForumChannel | discord.VoiceChannel | discord.StageChannel,
+) -> discord.Webhook:
     lock = flat_webhook_locks.setdefault(channel.id, asyncio.Lock())
     async with lock:
         webhook = flat_webhooks.get(channel.id)
@@ -769,7 +771,10 @@ async def send_flat_response(interaction: discord.Interaction, content: str) -> 
     if isinstance(channel, discord.Thread):
         thread = channel
         channel = channel.parent or await bot.fetch_channel(channel.parent_id)
-    if not isinstance(channel, (discord.TextChannel, discord.ForumChannel, discord.VoiceChannel)):
+    if not isinstance(
+        channel,
+        (discord.TextChannel, discord.ForumChannel, discord.VoiceChannel, discord.StageChannel),
+    ):
         print(f"Flat webhook skipped for unsupported channel ({type(channel).__name__}).")
         return False
 

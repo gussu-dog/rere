@@ -971,10 +971,13 @@ async def observe(interaction: discord.Interaction, character: str) -> None:
             await send_response(interaction, "시트에서 캐릭터의 기능치를 찾지 못했어요. 캐릭터 등록과 시트 내용을 확인해 주세요!")
             return
         if data.occupation and random.random() < 0.10:
+            occupation_activity = random.choice([
+                f"{data.occupation} 일을 하고 있었어요! 집중하는 모습이 눈에 들어오네요!",
+                f"{data.occupation} 일을 시작하기 전에 오늘 일정을 확인하고 있었어요! 차근차근 준비하는 모습이 보기 좋아요!",
+            ])
             await send_response(
                 interaction,
-                f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} {data.occupation} 일을 하고 있었어요! "
-                "집중하는 모습이 눈에 들어오네요!",
+                f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} {occupation_activity}",
             )
             return
         candidates = []

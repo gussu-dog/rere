@@ -163,8 +163,14 @@ public class CommandsModule : InteractionModuleBase<SocketInteractionContext>
         var occupation = await _sheetRegistry.GetOccupationAsync(캐릭터);
         if (!string.IsNullOrWhiteSpace(occupation) && Random.Shared.Next(10) == 0)
         {
+            var occupationActivities = new[]
+            {
+                $"{occupation} 일을 하고 있었어요! 집중하는 모습이 눈에 들어오네요!",
+                $"{occupation} 일을 시작하기 전에 오늘 일정을 확인하고 있었어요! 차근차근 준비하는 모습이 보기 좋아요!"
+            };
+            var occupationActivity = occupationActivities[Random.Shared.Next(occupationActivities.Length)];
             await RespondAsync(
-                $"레레가 살짝 보고 왔는데, **{characterName}**{ObservationActivities.TopicParticle(characterName)} {occupation} 일을 하고 있었어요! 집중하는 모습이 눈에 들어오네요!",
+                $"레레가 살짝 보고 왔는데, **{characterName}**{ObservationActivities.TopicParticle(characterName)} {occupationActivity}",
                 ephemeral: false);
             return;
         }

@@ -751,15 +751,20 @@ async def get_flat_webhook(
         webhook = flat_webhooks.get(channel.id)
         if webhook is not None:
             return webhook
+        avatar_path = Path(__file__).resolve().parent / "flat.png"
+        avatar = await asyncio.to_thread(avatar_path.read_bytes)
         webhooks = await channel.webhooks()
         webhook = next((item for item in webhooks if item.name == FLAT_WEBHOOK_NAME), None)
         if webhook is None:
-            avatar_path = Path(__file__).resolve().parent / "flat.png"
-            avatar = await asyncio.to_thread(avatar_path.read_bytes)
             webhook = await channel.create_webhook(
                 name=FLAT_WEBHOOK_NAME,
                 avatar=avatar,
                 reason="응원과 운세의 플랫 연출용 웹훅",
+            )
+        else:
+            webhook = await webhook.edit(
+                avatar=avatar,
+                reason="플랫 프로필 사진 업데이트",
             )
         flat_webhooks[channel.id] = webhook
         return webhook

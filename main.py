@@ -72,6 +72,9 @@ SKILL_BASE_VALUES = {
     "도약": 20, "승마": 5, "투척": 20, "신용": 0,
     "크툴루신화": 0, "폭파": 1,
 }
+# Used only for /기능판정's autocomplete and default-value fallback.
+# Observation keeps using the sheet values and its separate selection logic.
+CHECK_DEFAULT_SKILL_VALUES = dict(SKILL_BASE_VALUES)
 
 CHEER_MESSAGES = [
     "파이팅~! 레레가 힘을 보탤게요!",
@@ -288,13 +291,25 @@ class SheetRegistry:
 
     async def get_skills(self, character_value: str) -> list[str]:
         data = await self._get_skill_data(character_value)
-        return sorted(data.values, key=str.casefold) if data else []
+        if not data:
+            return []
+        sheet_skills = list(data.values)
+        existing = {skill.casefold() for skill in sheet_skills}
+        missing_defaults = [skill for skill in CHECK_DEFAULT_SKILL_VALUES if skill.casefold() not in existing]
+        return sorted(missing_defaults, key=str.casefold) + sorted(sheet_skills, key=str.casefold)
 
     async def get_skill_value(self, character_value: str, skill_name: str) -> int | None:
         data = await self._get_skill_data(character_value)
         if not data:
             return None
-        return next((value for key, value in data.values.items() if key.casefold() == skill_name.casefold()), None)
+        sheet_value = next((value for key, value in data.values.items() if key.casefold() == skill_name.casefold()), None)
+        if sheet_value is not None:
+            return sheet_value
+        if skill_name.casefold() == "회피":
+            dexterity = next((value for key, value in data.values.items() if key.casefold() == "민첩"), None)
+            if dexterity is not None:
+                return dexterity // 2
+        return next((value for key, value in CHECK_DEFAULT_SKILL_VALUES.items() if key.casefold() == skill_name.casefold()), None)
 
     async def get_character_emote_name(self, character_value: str, succeeded: bool) -> str | None:
         data = await self._get_skill_data(character_value)

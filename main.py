@@ -761,6 +761,20 @@ async def roll_mode_autocomplete(interaction: discord.Interaction, current: str)
 async def observe(interaction: discord.Interaction, character: str) -> None:
     await interaction.response.defer(thinking=True)
     try:
+        resolved = await registry.resolve_character_reference(character)
+        if resolved is None:
+            await send_response(interaction, "등록된 캐릭터를 시트에서 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요!", ephemeral=True)
+            return
+        _sheet_id, character_name = resolved
+
+        if random.random() < 0.30:
+            await send_response(
+                interaction,
+                f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} 잠시 자리에 앉아 쉬고 있었어요! "
+                "잠깐 쉬어가는 것도 좋지요. 레레도 옆에서 조용히 있을게요!",
+            )
+            return
+
         data = await registry._get_skill_data(character)
         if not data or not data.values:
             await send_response(interaction, "시트에서 캐릭터의 기능치를 찾지 못했어요. 캐릭터 등록과 시트 내용을 확인해 주세요!")
@@ -797,10 +811,6 @@ async def observe(interaction: discord.Interaction, character: str) -> None:
         else:
             selected_skill = weighted_choice(candidates)
 
-        resolved = await registry.resolve_character_reference(character)
-        if resolved is None:
-            await send_response(interaction, "등록된 캐릭터를 시트에서 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요!", ephemeral=True)
-            return
         sheet_id, character_name = resolved
         other_names = []
         for value, _name in await registry.get_character_tab_choices(sheet_id):

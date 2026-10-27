@@ -347,10 +347,9 @@ class SheetRegistry:
         data = await self._get_skill_data(character_value)
         if not data:
             return []
-        sheet_skills = list(data.values)
-        existing = {skill.casefold() for skill in sheet_skills}
-        missing_defaults = [skill for skill in CHECK_DEFAULT_SKILL_VALUES if skill.casefold() not in existing]
-        return sorted(missing_defaults, key=str.casefold) + sorted(sheet_skills, key=str.casefold)
+        # Autocomplete must reflect this character sheet only. Adding every
+        # standard skill here exposed skills the sheet does not actually use.
+        return sorted(data.values, key=str.casefold)
 
     async def get_skill_value(self, character_value: str, skill_name: str) -> int | None:
         data = await self._get_skill_data(character_value)

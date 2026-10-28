@@ -6,7 +6,7 @@ import os
 import random
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, DivisionByZero, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -184,6 +184,11 @@ class CombatWeapon:
     skill_reference: str
     damage: str
     impaling: bool = False
+    damage_bonus: str = ""
+    attacks: str = ""
+    ammo: int | None = None
+    malfunction: int | None = None
+    broken: bool = False
 
 
 @dataclass
@@ -375,7 +380,7 @@ class SheetRegistry:
 
     async def get_combat_weapons(self, character_value: str) -> list[CombatWeapon]:
         data = await self._get_skill_data(character_value)
-        return list(data.weapons) if data else []
+        return [replace(weapon, broken=False) for weapon in data.weapons] if data else []
 
     async def get_character_emote_name(self, character_value: str, succeeded: bool) -> str | None:
         data = await self._get_skill_data(character_value)
@@ -584,6 +589,18 @@ class SheetRegistry:
         if skill_index is None or damage_index is None or (name_index is None and fallback_name_index is None):
             return []
 
+        db_index = next((index for index, value in enumerate(header) if value == "db"), None)
+        attacks_index = next((index for index, value in enumerate(header) if value in {"횟수", "공격 횟수"}), None)
+        ammo_index = next((index for index, value in enumerate(header) if value in {"탄약", "탄환"}), None)
+        malfunction_index = next((index for index, value in enumerate(header) if value in {"고장", "고장치"}), None)
+
+        def cell(row: list[str], index: int | None) -> str:
+            return row[index].strip() if index is not None and index < len(row) else ""
+
+        def first_number(value: str) -> int | None:
+            match = re.search(r"\d+", value.replace(",", ""))
+            return int(match.group()) if match else None
+
         weapons: list[CombatWeapon] = []
         for row in rows[header_index + 1:]:
             explicit_name = row[name_index].strip() if name_index is not None and name_index < len(row) else ""
@@ -596,7 +613,19 @@ class SheetRegistry:
             if damage.strip().casefold() == "충격":
                 continue
             impaling = re.search(r"\(\s*치\s*\)", damage, re.IGNORECASE) is not None
-            weapons.append(CombatWeapon(name, skill_reference, damage or "미기재", impaling))
+            ammo_text = cell(row, ammo_index)
+            ammo = first_number(ammo_text)
+            malfunction = first_number(cell(row, malfunction_index))
+            weapons.append(CombatWeapon(
+                name=name,
+                skill_reference=skill_reference,
+                damage=damage or "미기재",
+                impaling=impaling,
+                damage_bonus=cell(row, db_index),
+                attacks=cell(row, attacks_index),
+                ammo=ammo,
+                malfunction=malfunction,
+            ))
         return weapons
 
 
@@ -1117,6 +1146,41 @@ def sort_combat_initiative(participants: list[CombatParticipant]) -> tuple[list[
     return ordered, tie_logs
 
 
+def is_projectile_weapon(weapon: CombatWeapon) -> bool:
+    reference = f"{weapon.skill_reference} {weapon.name}".casefold()
+    return "사격" in reference or "투척" in reference
+
+
+def roll_damage_formula(formula: str) -> tuple[int, str]:
+    """Roll only the weapon's listed damage dice, without adding a damage bonus."""
+    cleaned = re.sub(r"\(\s*치\s*\)", "", formula, flags=re.IGNORECASE).strip()
+    if not cleaned or cleaned.casefold() in {"미기재", "충격", "-"}:
+        return 0, cleaned or "미기재"
+    tokens = re.findall(r"[+-]?\s*(?:\d+\s*[dD]\s*\d+|\d+)", cleaned)
+    if not tokens or "".join(tokens).replace(" ", "").casefold() != cleaned.replace(" ", "").casefold():
+        return 0, cleaned
+    total = 0
+    details: list[str] = []
+    for token in tokens:
+        compact = token.replace(" ", "")
+        sign = -1 if compact.startswith("-") else 1
+        term = compact.lstrip("+-")
+        dice_match = re.fullmatch(r"(\d*)[dD](\d+)", term)
+        if dice_match:
+            count = int(dice_match.group(1) or "1")
+            sides = int(dice_match.group(2))
+            if count < 1 or sides < 1:
+                return 0, cleaned
+            rolls = [random.randint(1, sides) for _ in range(count)]
+            total += sign * sum(rolls)
+            details.append(("-" if sign < 0 else "+") + f"{count}d{sides} [{', '.join(map(str, rolls))}]")
+        else:
+            value = int(term)
+            total += sign * value
+            details.append(("-" if sign < 0 else "+") + str(value))
+    return total, " ".join(details).lstrip("+")
+
+
 class CombatLobbyView(discord.ui.View):
     def __init__(self, session: CombatSession) -> None:
         super().__init__(timeout=None)
@@ -1177,7 +1241,11 @@ class CombatWeaponSelect(discord.ui.Select):
             discord.SelectOption(
                 label=trim_choice_name(f"{weapon.name} — {weapon.skill_reference}"),
                 value=str(index),
-                description=trim_choice_name(f"피해: {weapon.damage}"),
+                description=trim_choice_name(
+                    f"피해 {weapon.damage} · DB {weapon.damage_bonus or '없음'}"
+                    + (f" · 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else "")
+                    + (" · 고장" if weapon.broken else "")
+                ),
             )
             for index, weapon in enumerate(current.weapons[:25])
         ]
@@ -1210,34 +1278,80 @@ class CombatView(discord.ui.View):
             if not 0 <= weapon_index < len(current.weapons):
                 await interaction.response.send_message("무기 선택이 만료됐어요. 화면을 새로 확인해 주세요.", ephemeral=True)
                 return
-            await interaction.response.defer()
             weapon = current.weapons[weapon_index]
-            skill_name = normalize_weapon_skill_reference(weapon.skill_reference)
-            try:
-                skill_value = await registry.get_skill_value(current.character_value, skill_name)
-                if skill_value is None:
-                    await interaction.followup.send(
-                        f"무기 `{weapon.name}`의 참조 기능치 `{weapon.skill_reference}`를 시트에서 찾지 못했어요."
-                        " 기능치 표기와 기능치 값을 확인해 주세요.",
-                        ephemeral=True,
-                    )
-                    return
-                roll = random.randint(1, 100)
-                result = coc_combat_check_result(roll, skill_value)
-                session.recent_logs.append(
-                    f"• {current.character_name} — {weapon.name} / {skill_name} ({skill_value}): `1d100 [{roll}]` → **{result}**"
+            if weapon.broken:
+                await interaction.response.send_message(f"`{weapon.name}`은(는) 고장 나서 사용할 수 없어요.", ephemeral=True)
+                return
+            if is_projectile_weapon(weapon) and (weapon.ammo is None or weapon.ammo <= 0):
+                await interaction.response.send_message(f"`{weapon.name}`의 탄약이 없어요.", ephemeral=True)
+                return
+            if is_projectile_weapon(weapon):
+                await interaction.response.send_message(
+                    f"`{weapon.name}` 현재 탄약: {weapon.ammo}발. 몇 발 연사할까요?",
+                    view=CombatShotCountView(session, weapon_index), ephemeral=True,
                 )
-                session.recent_logs = session.recent_logs[-4:]
-                session.turn_index += 1
-                if session.turn_index >= len(session.participants):
-                    session.turn_index = 0
-                    session.round_number += 1
-                await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
-            except SheetError as exc:
-                await interaction.followup.send(str(exc), ephemeral=True)
-            except Exception as exc:
-                print(f"Combat weapon action failed ({type(exc).__name__}).")
-                await interaction.followup.send("굴림을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            await self.resolve_weapon(interaction, weapon_index, 1)
+
+    async def resolve_weapon(self, interaction: discord.Interaction, weapon_index: int, shot_count: int) -> None:
+        session = self.session
+        current = session.participants[session.turn_index]
+        weapon = current.weapons[weapon_index]
+        skill_name = normalize_weapon_skill_reference(weapon.skill_reference)
+        try:
+            skill_value = await registry.get_skill_value(current.character_value, skill_name)
+            if skill_value is None:
+                await interaction.followup.send(
+                    f"무기 `{weapon.name}`의 참조 기능치 `{weapon.skill_reference}`를 시트에서 찾지 못했어요. 기능치 표기와 기능치 값을 확인해 주세요.",
+                    ephemeral=True,
+                )
+                return
+            if is_projectile_weapon(weapon):
+                if weapon.ammo is None or weapon.ammo <= 0:
+                    await interaction.followup.send(f"`{weapon.name}`의 탄약이 없어요.", ephemeral=True)
+                    return
+                shot_count = min(max(1, shot_count), 3, weapon.ammo)
+
+            shot_logs: list[str] = []
+            for shot_number in range(1, shot_count + 1):
+                penalty_dice = shot_number - 1 if is_projectile_weapon(weapon) else 0
+                rolls = [random.randint(1, 100) for _ in range(penalty_dice + 1)]
+                roll = max(rolls) if penalty_dice else rolls[0]
+                result = coc_combat_check_result(roll, skill_value)
+                die_text = f"`1d100 [{', '.join(str(value) for value in rolls)}]`"
+                mode_text = f" (패널티 +{penalty_dice})" if penalty_dice else ""
+                line = f"{shot_number}발째{mode_text}: {die_text} → **{result}**"
+                if is_projectile_weapon(weapon) and weapon.ammo is not None:
+                    weapon.ammo -= 1
+
+                if weapon.malfunction is not None and roll >= weapon.malfunction:
+                    weapon.broken = True
+                    self_damage, damage_detail = roll_damage_formula(weapon.damage)
+                    line += f" · 고장! 본인 피해 `{damage_detail}` = **{self_damage}** (무기 피해식만 적용)"
+                    shot_logs.append(line)
+                    break
+                shot_logs.append(line)
+
+            ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
+            damage_bonus_text = f" · DB {weapon.damage_bonus}" if weapon.damage_bonus else ""
+            weapon_state = " · 고장" if weapon.broken else ""
+            session.recent_logs.append(
+                f"• {current.character_name} — {weapon.name} / {skill_name} ({skill_value}){damage_bonus_text}{ammo_text}{weapon_state}\n  "
+                + "\n  ".join(shot_logs)
+            )
+            session.recent_logs = session.recent_logs[-4:]
+            session.turn_index += 1
+            if session.turn_index >= len(session.participants):
+                session.turn_index = 0
+                session.round_number += 1
+            await session.message.edit(content=render_combat_session(session), view=CombatView(session))
+        except SheetError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+        except Exception as exc:
+            print(f"Combat weapon action failed ({type(exc).__name__}).")
+            await interaction.followup.send("굴림을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
+
 
     @discord.ui.button(label="차례 넘기기", style=discord.ButtonStyle.secondary, emoji="⏭️")
     async def pass_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -1266,6 +1380,37 @@ class CombatView(discord.ui.View):
             combat_sessions.pop(session.channel_id, None)
             await interaction.response.edit_message(content="모의전투를 종료했어요.", view=None)
         self.stop()
+
+
+class CombatShotCountSelect(discord.ui.Select):
+    def __init__(self, session: CombatSession, weapon_index: int) -> None:
+        weapon = session.participants[session.turn_index].weapons[weapon_index]
+        max_shots = min(3, weapon.ammo or 0)
+        options = [discord.SelectOption(label=f"{count}발 연사", value=str(count)) for count in range(1, max_shots + 1)]
+        super().__init__(placeholder="연사할 발수를 선택해 주세요", min_values=1, max_values=1, options=options)
+        self.session = session
+        self.weapon_index = weapon_index
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        async with session.lock:
+            current = session.participants[session.turn_index]
+            if interaction.user.id != current.user_id:
+                await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            root_view = CombatView(session)
+            await root_view.resolve_weapon(interaction, self.weapon_index, int(self.values[0]))
+            if interaction.message:
+                await interaction.message.edit(content="연사를 처리했어요.", view=None)
+            if self.view:
+                self.view.stop()
+
+
+class CombatShotCountView(discord.ui.View):
+    def __init__(self, session: CombatSession, weapon_index: int) -> None:
+        super().__init__(timeout=120)
+        self.add_item(CombatShotCountSelect(session, weapon_index))
 
 
 @combat_group.command(name="모집", description="이 채널에서 모의전투 참가자를 모집해요!")

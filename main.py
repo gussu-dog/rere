@@ -1144,6 +1144,11 @@ def combat_is_active(member: CombatParticipant) -> bool:
     return member.hp > 0 and not member.unconscious and not member.forfeited
 
 
+def calculate_combat_max_hp(member: CombatParticipant) -> int:
+    divisor = 5 if member.is_pulp else 10
+    return max(1, (member.constitution + member.size) // divisor)
+
+
 def active_combat_statuses(session: CombatSession, member: CombatParticipant) -> list[CombatStatusEffect]:
     # Turn changes never expire shock; losing its active source does.
     return [effect for effect in member.status_effects
@@ -1745,7 +1750,7 @@ class CombatLobbyView(discord.ui.View):
                     member.strength = strength or 0
                     member.constitution = constitution or 0
                     member.size = size or 0
-                    member.max_hp = max(1, (member.constitution + member.size) // 10)
+                    member.max_hp = calculate_combat_max_hp(member)
                     member.hp = member.max_hp
                     member.weapons = weapons
                     member.defended_round = 0

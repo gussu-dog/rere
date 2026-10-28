@@ -952,6 +952,7 @@ class CombatSession:
     phase: str = "lobby"
     round_number: int = 1
     turn_index: int = 0
+    initiative_logs: list[str] = field(default_factory=list)
     recent_logs: list[str] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -975,11 +976,13 @@ def render_combat_session(session: CombatSession) -> str:
 
     current = session.participants[session.turn_index]
     logs = "\n".join(session.recent_logs) or "아직 굴림 기록이 없어요."
+    initiative = "\n".join(session.initiative_logs) or "동률 판정은 없었어요."
     return (
         f"**전투 시뮬레이션을 시작할게요!**\n"
         f"**{session.round_number}라운드 · 현재 차례:** {current.character_name} ({current.player_name})\n"
         "\n"
         f"**참가자 · 민첩 순**\n{roster}\n\n"
+        f"**민첩 동률 판정**\n{initiative}\n\n"
         f"**최근 굴림 (최대 4회)**\n{logs}\n\n"
         "현재 시제품은 민첩 순서와 기능 판정을 확인하는 단계예요. 피해와 체력 계산은 아직 적용하지 않아요."
     )
@@ -997,6 +1000,60 @@ def coc_combat_check_result(roll: int, skill_value: int) -> str:
     if roll <= skill_value:
         return "보통 성공"
     return "실패"
+
+
+def resolve_tied_initiative(
+    participants: list[CombatParticipant],
+    dexterity: int,
+    logs: list[str],
+    attempt: int = 1,
+) -> list[CombatParticipant]:
+    if len(participants) <= 1:
+        return participants
+
+    ranked: dict[int, list[CombatParticipant]] = {}
+    labels = {
+        "대실패": 0,
+        "실패": 1,
+        "보통 성공": 2,
+        "어려운 성공": 3,
+        "극단적 성공": 4,
+        "대성공": 5,
+    }
+    roll_details: list[str] = []
+    for participant in participants:
+        roll = random.randint(1, 100)
+        result = coc_combat_check_result(roll, dexterity)
+        ranked.setdefault(labels[result], []).append(participant)
+        roll_details.append(f"{participant.character_name} `1d100 [{roll}]` {result}")
+
+    retry_label = "동률 재굴림" if attempt > 1 else "동률 판정"
+    logs.append(f"민첩 {dexterity} {retry_label} {attempt}차: " + " · ".join(roll_details))
+
+    ordered: list[CombatParticipant] = []
+    for rank in sorted(ranked, reverse=True):
+        same_result = ranked[rank]
+        if len(same_result) == 1:
+            ordered.extend(same_result)
+        else:
+            ordered.extend(resolve_tied_initiative(same_result, dexterity, logs, attempt + 1))
+    return ordered
+
+
+def sort_combat_initiative(participants: list[CombatParticipant]) -> tuple[list[CombatParticipant], list[str]]:
+    by_dexterity: dict[int, list[CombatParticipant]] = {}
+    for participant in participants:
+        by_dexterity.setdefault(participant.dexterity, []).append(participant)
+
+    ordered: list[CombatParticipant] = []
+    tie_logs: list[str] = []
+    for dexterity in sorted(by_dexterity, reverse=True):
+        group = by_dexterity[dexterity]
+        if len(group) == 1:
+            ordered.extend(group)
+        else:
+            ordered.extend(resolve_tied_initiative(group, dexterity, tie_logs))
+    return ordered, tie_logs
 
 
 class CombatLobbyView(discord.ui.View):
@@ -1021,7 +1078,7 @@ class CombatLobbyView(discord.ui.View):
                     return
                 for member in session.participants:
                     member.dexterity = await registry.get_skill_value(member.character_value, "민첩") or 0
-                session.participants.sort(key=lambda member: member.dexterity, reverse=True)
+                session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
                 session.phase = "combat"
                 session.round_number = 1
                 session.turn_index = 0

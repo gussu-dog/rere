@@ -378,8 +378,10 @@ class SheetRegistry:
                 return dexterity // 2
         return next((value for key, value in CHECK_DEFAULT_SKILL_VALUES.items() if key.casefold() == skill_name.casefold()), None)
 
-    async def get_combat_weapons(self, character_value: str) -> list[CombatWeapon]:
-        data = await self._get_skill_data(character_value)
+    async def get_combat_weapons(self, character_value: str, *, refresh: bool = False) -> list[CombatWeapon]:
+        data = await self._get_skill_data(character_value, force_refresh=refresh)
+        if data is None and refresh:
+            raise SheetError("무기 목록을 읽을 캐릭터 시트를 찾지 못했어요.")
         return [replace(weapon, broken=False) for weapon in data.weapons] if data else []
 
     async def get_character_emote_name(self, character_value: str, succeeded: bool) -> str | None:
@@ -392,7 +394,7 @@ class SheetRegistry:
             return f"{sheet_marker}_{outcome}_{character_marker}"
         return f"{outcome}_{sheet_marker}"
 
-    async def _get_skill_data(self, character_value: str) -> CachedSkillData | None:
+    async def _get_skill_data(self, character_value: str, *, force_refresh: bool = False) -> CachedSkillData | None:
         resolved = await self.resolve_character_reference(character_value)
         if resolved is None:
             return None
@@ -402,12 +404,12 @@ class SheetRegistry:
 
         cache_key = f"{spreadsheet_id}|{tab}"
         cached = self._skill_cache.get(cache_key)
-        if cached and cached.expires_at > time.monotonic():
+        if not force_refresh and cached and cached.expires_at > time.monotonic():
             return cached
         lock = self._skill_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
             cached = self._skill_cache.get(cache_key)
-            if cached and cached.expires_at > time.monotonic():
+            if not force_refresh and cached and cached.expires_at > time.monotonic():
                 return cached
             escaped_tab = tab.replace("'", "''")
             use_sorted_table = spreadsheet_id == SORTED_TABLE_SPREADSHEET_ID
@@ -1039,6 +1041,7 @@ class CombatParticipant:
     max_hp: int = 0
     is_pulp: bool = False
     weapons: list[CombatWeapon] = field(default_factory=list)
+    weapon_states: dict[tuple[str, str, int], tuple[int | None, bool]] = field(default_factory=dict)
 
 
 @dataclass
@@ -1257,6 +1260,35 @@ def advance_combat_turn(session: CombatSession) -> None:
             return
 
 
+def merge_combat_weapons(member: CombatParticipant, incoming: list[CombatWeapon]) -> None:
+    def keyed(weapons: list[CombatWeapon]):
+        counts: dict[tuple[str, str], int] = {}
+        for weapon in weapons:
+            identity = (" ".join(weapon.name.split()).casefold(), normalize_weapon_skill_reference(weapon.skill_reference).casefold())
+            occurrence = counts.get(identity, 0)
+            counts[identity] = occurrence + 1
+            yield (*identity, occurrence), weapon
+
+    states = dict(member.weapon_states)
+    for key, weapon in keyed(member.weapons):
+        states[key] = (weapon.ammo, weapon.broken)
+    for key, weapon in keyed(incoming):
+        if key in states:
+            weapon.ammo, weapon.broken = states[key]
+    member.weapons = incoming
+    member.weapon_states = states
+
+
+async def refresh_combat_turn_weapons(session: CombatSession) -> None:
+    member = session.participants[session.turn_index]
+    try:
+        incoming = await registry.get_combat_weapons(member.character_value, refresh=True)
+        merge_combat_weapons(member, incoming)
+    except Exception as exc:
+        print(f"Combat turn weapon refresh failed ({type(exc).__name__}).")
+        session.briefing += " 무기 갱신에 실패해 기존 목록으로 진행해요. 다음 차례에 다시 갱신할게요."
+
+
 def roll_damage_formula(formula: str) -> tuple[int, str]:
     """Roll only the weapon's listed damage dice, without adding a damage bonus."""
     cleaned = re.sub(r"\(\s*치\s*\)", "", formula, flags=re.IGNORECASE).strip()
@@ -1369,7 +1401,7 @@ class CombatLobbyView(discord.ui.View):
                         registry.get_skill_value(member.character_value, "근력"),
                         registry.get_skill_value(member.character_value, "건강"),
                         registry.get_skill_value(member.character_value, "크기"),
-                        registry.get_combat_weapons(member.character_value),
+                        registry.get_combat_weapons(member.character_value, refresh=True),
                     )
                     return dexterity, strength, constitution, size, weapons
 
@@ -1577,6 +1609,8 @@ class CombatView(CombatActionView):
                 session.briefing = (
                     f"{with_particle(current.character_name, '가', '이')} {movement}! 아직 {current.character_name}의 턴이에요!"
                 )
+            if not succeeded:
+                await refresh_combat_turn_weapons(session)
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
@@ -1795,6 +1829,7 @@ class CombatView(CombatActionView):
         advance_combat_turn(session)
         next_turn = session.participants[session.turn_index]
         session.briefing = f"{summary} 이제 {next_turn.character_name}의 턴이에요!"
+        await refresh_combat_turn_weapons(session)
         await session.message.edit(content=render_combat_session(session), view=CombatView(session))
 
 
@@ -1814,6 +1849,7 @@ class CombatView(CombatActionView):
             advance_combat_turn(session)
             next_turn = session.participants[session.turn_index]
             session.briefing = f"{with_particle(current.character_name, '가', '이')} 차례를 넘겼어요. 이제 {next_turn.character_name}의 턴이에요!"
+            await refresh_combat_turn_weapons(session)
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
 class CombatMoveTargetView(CombatActionView):

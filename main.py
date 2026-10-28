@@ -1054,7 +1054,7 @@ class CombatSession:
 combat_sessions: dict[int, CombatSession] = {}
 
 
-def render_combat_session(session: CombatSession) -> str:
+def render_combat_session(session: CombatSession, prompt: str | None = None) -> str:
     roster = "\n".join(
         f"{index}. {member.character_name} ({member.dexterity})" if session.phase == "combat"
         else f"{index}. {member.character_name}"
@@ -1075,6 +1075,8 @@ def render_combat_session(session: CombatSession) -> str:
     if session.initiative_logs:
         sections.append("선공 동률 판정\n" + "\n".join(session.initiative_logs[-2:]))
     sections.append(f"최근 기록\n{logs}")
+    if prompt:
+        sections.append(prompt)
     body = "\n\n".join(sections)
     if len(body) > 1850:
         body = body[:1847] + "..."
@@ -1353,9 +1355,12 @@ class CombatView(discord.ui.View):
                 await interaction.response.send_message(f"`{weapon.name}`의 탄약이 없어요.", ephemeral=True)
                 return
             if is_projectile_weapon(weapon):
-                await interaction.response.send_message(
-                    f"`{weapon.name}` 현재 탄약: {weapon.ammo}발. 몇 발 연사할까요?",
-                    view=CombatShotCountView(session, weapon_index), ephemeral=True,
+                await interaction.response.edit_message(
+                    content=render_combat_session(
+                        session,
+                        f"선택 무기: {weapon.name}\n남은 탄약: {weapon.ammo}발\n연사 발수 선택",
+                    ),
+                    view=CombatShotCountView(session, weapon_index),
                 )
                 return
             await interaction.response.defer()
@@ -1471,11 +1476,9 @@ class CombatShotCountSelect(discord.ui.Select):
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer()
             root_view = CombatView(session)
             await root_view.resolve_weapon(interaction, self.weapon_index, int(self.values[0]))
-            if interaction.message:
-                await interaction.message.edit(content="연사를 처리했어요.", view=None)
             if self.view:
                 self.view.stop()
 

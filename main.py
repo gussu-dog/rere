@@ -1721,6 +1721,9 @@ class CombatView(CombatActionView):
                 await interaction.followup.send("이 무기로 공격할 수 있는 상대가 없어요. 근접전은 근거리에서만 가능해요.", ephemeral=True)
                 await session.message.edit(content=render_combat_session(session), view=CombatView(session))
                 return
+            random_target = target_index == -1
+            if random_target:
+                target_index = random.choice(targets)
             if target_index is None and len(targets) > 1:
                 await session.message.edit(
                     content=render_combat_session(session, "공격 대상 선택"),
@@ -1747,6 +1750,10 @@ class CombatView(CombatActionView):
                     raise SheetError("대실패 피해에 필요한 비무장 무기를 시트에서 찾지 못했어요.")
             session.pending_attack = attack
             session.last_attack = f"{current.character_name} → {session.participants[target_index].character_name} · {weapon.name}"
+            if random_target:
+                session.last_attack += " · 무작위 대상"
+                session.recent_logs.append(f"【무작위 대상】 {current.character_name} → {session.participants[target_index].character_name}")
+                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             session.last_attack_events = []
             session.briefing = f"{current.character_name} → {session.participants[target_index].character_name}, 공격 판정 중이에요."
             await self.process_pending_attack(interaction)
@@ -1982,13 +1989,16 @@ class CombatShotCountView(CombatActionView):
 
 class CombatTargetSelect(discord.ui.Select):
     def __init__(self, session: CombatSession, weapon_index: int, shot_count: int, targets: list[int]) -> None:
-        options = [
+        options = [discord.SelectOption(
+            label="무작위 1명", value="random",
+            description="현재 무기로 공격 가능한 상대 중 한 명을 무작위로 선택",
+        )] + [
             discord.SelectOption(
                 label=trim_choice_name(session.participants[index].character_name),
                 value=str(index),
                 description=f"HP {session.participants[index].hp}/{session.participants[index].max_hp}",
             )
-            for index in targets[:25]
+            for index in targets[:24]
         ]
         super().__init__(placeholder="공격할 상대를 선택해 주세요", min_values=1, max_values=1, options=options)
         self.session = session
@@ -2006,7 +2016,8 @@ class CombatTargetSelect(discord.ui.Select):
                 return
             await interaction.response.defer()
             await CombatView(session).resolve_weapon(
-                interaction, self.weapon_index, self.shot_count, int(self.values[0])
+                interaction, self.weapon_index, self.shot_count,
+                -1 if self.values[0] == "random" else int(self.values[0]),
             )
 
 

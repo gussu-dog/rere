@@ -1049,6 +1049,8 @@ class PendingCombatAttack:
     skill_value: int
     shot_count: int
     hits: list[tuple[int, str, int]] = field(default_factory=list)
+    stage: str = "rolling"
+    luck_value: int | None = None
 
 
 @dataclass
@@ -1061,7 +1063,7 @@ class CombatSession:
     phase: str = "lobby"
     round_number: int = 1
     turn_index: int = 0
-    distance: str = "보통거리"
+    distances: dict[tuple[int, int], str] = field(default_factory=dict)
     initiative_logs: list[str] = field(default_factory=list)
     recent_logs: list[str] = field(default_factory=list)
     pending_attack: PendingCombatAttack | None = None
@@ -1071,6 +1073,19 @@ class CombatSession:
 
 combat_sessions: dict[int, CombatSession] = {}
 COMBAT_RECENT_LOG_LIMIT = 12
+
+
+def combat_distance(session: CombatSession, first: int, second: int) -> str:
+    return session.distances.get(tuple(sorted((first, second))), "보통거리")
+
+
+def combat_targets(session: CombatSession, weapon: CombatWeapon | None = None) -> list[int]:
+    return [
+        index for index, member in enumerate(session.participants)
+        if index != session.turn_index and member.hp > 0
+        and (weapon is None or not is_melee_weapon(weapon)
+             or combat_distance(session, session.turn_index, index) == "근거리")
+    ]
 
 
 def render_combat_session(session: CombatSession, prompt: str | None = None) -> str:
@@ -1091,9 +1106,13 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
+    distances = " · ".join(
+        f"{session.participants[index].character_name}: {combat_distance(session, session.turn_index, index)}"
+        for index in combat_targets(session)
+    )
     sections = [
         f"모의전투 | {session.round_number}라운드\n"
-        f"거리: {session.distance}\n"
+        f"{current.character_name} 기준 거리: {distances}\n"
         f"행동 순서\n{roster}"
     ]
     if session.initiative_logs:
@@ -1102,13 +1121,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
     log_section_index = len(sections) - 1
     if prompt:
         sections.append(prompt)
-    if session.pending_attack is not None:
-        attack = session.pending_attack
-        attacker = session.participants[attack.attacker_index]
-        defender = session.participants[attack.target_index]
-        briefing = f"{attacker.character_name}의 공격이에요. {with_particle(defender.character_name, '가', '이')} 방어를 선택해요!"
-    else:
-        briefing = session.briefing or f"{current.character_name}의 턴이에요!"
+    briefing = session.briefing or f"{current.character_name}의 턴이에요!"
     footer = f"현재 상황\n{briefing}"
     visible_logs = session.recent_logs[:]
     while True:
@@ -1400,12 +1413,65 @@ class CombatLobbyView(discord.ui.View):
         self.stop()
 
 
+class CombatActionView(discord.ui.View):
+    def __init__(self, session: CombatSession, back: bool = False) -> None:
+        super().__init__(timeout=None)
+        self.session = session
+        self.turn_index = session.turn_index
+        self.attack = session.pending_attack
+        if back:
+            button = discord.ui.Button(label="돌아가기", style=discord.ButtonStyle.secondary, row=4)
+            button.callback = self.go_back
+            self.add_item(button)
+        button = discord.ui.Button(label="전투 종료", style=discord.ButtonStyle.danger, row=4)
+        button.callback = self.end_combat
+        self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.ensure_current(interaction)
+
+    async def ensure_current(self, interaction: discord.Interaction) -> bool:
+        session = self.session
+        if (combat_sessions.get(session.channel_id) is not session or session.phase != "combat"
+                or session.turn_index != self.turn_index or session.pending_attack is not self.attack
+                or (self.attack is not None and self.attack.stage != "defense")):
+            await interaction.response.send_message("이미 처리된 선택이에요. 현재 화면을 확인해 주세요.", ephemeral=True)
+            return False
+        return True
+
+    async def go_back(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            if interaction.user.id != session.participants[session.turn_index].user_id:
+                await interaction.response.send_message("현재 차례인 사람만 선택을 바꿀 수 있어요.", ephemeral=True)
+                return
+            session.briefing = f"{session.participants[session.turn_index].character_name}의 턴이에요!"
+            await interaction.response.edit_message(content=render_combat_session(session), view=CombatView(session))
+
+    async def end_combat(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        if interaction.user.id != session.owner_id:
+            await interaction.response.send_message("모집을 연 사람만 전투를 종료할 수 있어요.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        async with session.lock:
+            if session.phase != "combat":
+                return
+            combat_sessions.pop(session.channel_id, None)
+            session.phase = "finished"
+            session.pending_attack = None
+            await session.message.edit(content=render_combat_winner(session), view=None)
+        self.stop()
+
+
 class CombatWeaponSelect(discord.ui.Select):
     def __init__(self, session: CombatSession) -> None:
         current = session.participants[session.turn_index]
         available = [
             (index, weapon) for index, weapon in enumerate(current.weapons)
-            if session.distance == "근거리" or not is_melee_weapon(weapon)
+            if combat_targets(session, weapon)
         ]
         options = [
             discord.SelectOption(
@@ -1428,22 +1494,21 @@ class CombatWeaponSelect(discord.ui.Select):
             await view.select_weapon(interaction, int(self.values[0]))
 
 
-class CombatView(discord.ui.View):
+class CombatView(CombatActionView):
     def __init__(self, session: CombatSession) -> None:
-        super().__init__(timeout=None)
-        self.session = session
+        super().__init__(session)
         current = session.participants[session.turn_index]
-        available_weapons = [weapon for weapon in current.weapons if session.distance == "근거리" or not is_melee_weapon(weapon)]
+        available_weapons = [weapon for weapon in current.weapons if combat_targets(session, weapon)]
         if available_weapons:
             self.add_item(CombatWeaponSelect(session))
-        elif session.distance != "근거리" and any(is_melee_weapon(weapon) for weapon in current.weapons):
+        elif any(is_melee_weapon(weapon) for weapon in current.weapons):
             self.add_item(discord.ui.Button(label="근접전은 근거리에서 가능해요", style=discord.ButtonStyle.secondary, disabled=True))
         else:
             self.add_item(discord.ui.Button(label="시트에서 무기를 찾지 못했어요", style=discord.ButtonStyle.secondary, disabled=True))
-        close_button = discord.ui.Button(label="거리 좁히기", style=discord.ButtonStyle.primary, row=2, disabled=session.distance == "근거리")
+        close_button = discord.ui.Button(label="거리 좁히기", style=discord.ButtonStyle.primary, row=2, disabled=not any(combat_distance(session, session.turn_index, i) != "근거리" for i in combat_targets(session)))
         close_button.callback = self.close_distance
         self.add_item(close_button)
-        widen_button = discord.ui.Button(label="거리 넓히기", style=discord.ButtonStyle.secondary, row=2, disabled=session.distance == "먼 거리")
+        widen_button = discord.ui.Button(label="거리 넓히기", style=discord.ButtonStyle.secondary, row=2, disabled=not any(combat_distance(session, session.turn_index, i) != "먼 거리" for i in combat_targets(session)))
         widen_button.callback = self.widen_distance
         self.add_item(widen_button)
 
@@ -1453,15 +1518,33 @@ class CombatView(discord.ui.View):
     async def widen_distance(self, interaction: discord.Interaction) -> None:
         await self.move_distance(interaction, 1)
 
-    async def move_distance(self, interaction: discord.Interaction, direction: int) -> None:
+    async def move_distance(self, interaction: discord.Interaction, direction: int, target_index: int | None = None) -> None:
         session = self.session
         async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
             distance_order = ["근거리", "보통거리", "먼 거리"]
-            old_index = distance_order.index(session.distance)
+            targets = [i for i in combat_targets(session)
+                       if combat_distance(session, session.turn_index, i) != ("근거리" if direction < 0 else "먼 거리")]
+            if not targets:
+                await interaction.response.send_message("더 이동할 수 있는 상대가 없어요.", ephemeral=True)
+                return
+            if target_index is None and len(targets) > 1:
+                await interaction.response.edit_message(
+                    content=render_combat_session(session, "거리를 조절할 상대 선택"),
+                    view=CombatMoveTargetView(session, direction, targets),
+                )
+                return
+            target_index = targets[0] if target_index is None else target_index
+            if target_index not in targets:
+                await interaction.response.send_message("현재 이동할 수 없는 상대예요.", ephemeral=True)
+                return
+            target = session.participants[target_index]
+            old_index = distance_order.index(combat_distance(session, session.turn_index, target_index))
             new_index = min(max(old_index + direction, 0), len(distance_order) - 1)
             if new_index == old_index:
                 await interaction.response.send_message("더 이동할 수 없는 거리예요.", ephemeral=True)
@@ -1469,14 +1552,16 @@ class CombatView(discord.ui.View):
             await interaction.response.defer()
             roll = random.randint(1, 100)
             succeeded = roll <= current.dexterity
-            session.distance = distance_order[new_index]
+            distance = distance_order[new_index]
+            session.distances[tuple(sorted((session.turn_index, target_index)))] = distance
             outcome = "성공" if succeeded else "실패"
-            log = f"{current.character_name} — 거리 {session.distance} | 민첩 [{roll}] / {current.dexterity}: {outcome}"
+            log = f"{current.character_name} ↔ {target.character_name} — {distance} | 민첩 [{roll}] / {current.dexterity}: {outcome}"
             session.recent_logs.append(log)
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            session.briefing = f"{current.character_name}의 이동 판정 결과를 적용하고 있어요."
             await interaction.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
-            movement = "거리를 좁혔어요" if direction < 0 else "거리를 넓혔어요"
+            movement = f"{target.character_name} 쪽으로 거리를 좁혔어요" if direction < 0 else f"{target.character_name}에게서 거리를 넓혔어요"
             if not succeeded:
                 advance_combat_turn(session)
                 next_turn = session.participants[session.turn_index]
@@ -1493,6 +1578,8 @@ class CombatView(discord.ui.View):
     async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
         session = self.session
         async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
@@ -1501,7 +1588,7 @@ class CombatView(discord.ui.View):
                 await interaction.response.send_message("무기 선택이 만료됐어요. 화면을 새로 확인해 주세요.", ephemeral=True)
                 return
             weapon = current.weapons[weapon_index]
-            if is_melee_weapon(weapon) and session.distance != "근거리":
+            if not combat_targets(session, weapon):
                 await interaction.response.send_message("근접전 무기는 근거리에서만 사용할 수 있어요.", ephemeral=True)
                 return
             if weapon.broken:
@@ -1536,6 +1623,7 @@ class CombatView(discord.ui.View):
         try:
             skill_value = await registry.get_skill_value(current.character_value, skill_name)
             if skill_value is None:
+                await session.message.edit(content=render_combat_session(session), view=CombatView(session))
                 await interaction.followup.send(
                     f"무기 `{weapon.name}`의 참조 기능치 `{weapon.skill_reference}`를 시트에서 찾지 못했어요. 기능치 표기와 기능치 값을 확인해 주세요.",
                     ephemeral=True,
@@ -1546,12 +1634,10 @@ class CombatView(discord.ui.View):
                     await interaction.followup.send(f"`{weapon.name}`의 탄약이 없어요.", ephemeral=True)
                     return
                 shot_count = min(max(1, shot_count), 3, weapon.ammo)
-            targets = [
-                index for index, member in enumerate(session.participants)
-                if index != session.turn_index and member.hp > 0
-            ]
+            targets = combat_targets(session, weapon)
             if not targets:
-                await finish_combat_if_decided(session)
+                await interaction.followup.send("이 무기로 공격할 수 있는 상대가 없어요. 근접전은 근거리에서만 가능해요.", ephemeral=True)
+                await session.message.edit(content=render_combat_session(session), view=CombatView(session))
                 return
             if target_index is None and len(targets) > 1:
                 await session.message.edit(
@@ -1566,12 +1652,22 @@ class CombatView(discord.ui.View):
                 return
 
             attack = PendingCombatAttack(session.turn_index, target_index, weapon_index, skill_value, shot_count)
+            if weapon.malfunction is not None:
+                attack.luck_value = await registry.get_skill_value(current.character_value, "행운")
+                if attack.luck_value is None:
+                    raise SheetError("고장 판정에 필요한 행운 값을 읽지 못했어요. 다시 무기를 선택해 주세요.")
             session.pending_attack = attack
+            session.briefing = f"{current.character_name} → {session.participants[target_index].character_name}, 공격 판정 중이에요."
             await self.process_pending_attack(interaction)
         except SheetError as exc:
+            session.briefing = "시트 값을 읽지 못했어요. 무기를 다시 선택해 시도해 주세요."
+            await session.message.edit(content=render_combat_session(session), view=CombatView(session))
             await interaction.followup.send(str(exc), ephemeral=True)
         except Exception as exc:
             print(f"Combat weapon action failed ({type(exc).__name__}).")
+            if session.pending_attack is None:
+                session.briefing = "시트 연결을 확인한 뒤 무기를 다시 선택해 주세요."
+                await session.message.edit(content=render_combat_session(session), view=CombatView(session))
             await interaction.followup.send("굴림을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
 
     async def process_pending_attack(self, interaction: discord.Interaction) -> None:
@@ -1583,53 +1679,60 @@ class CombatView(discord.ui.View):
         target = session.participants[attack.target_index]
         weapon = current.weapons[attack.weapon_index]
         for shot_number in range(1, attack.shot_count + 1):
-                burst_penalty = shot_number - 1 if is_projectile_weapon(weapon) else 0
-                distance_modifier = 1 if is_projectile_weapon(weapon) and session.distance == "근거리" else -1 if is_projectile_weapon(weapon) and session.distance == "먼 거리" else 0
-                net_modifier = distance_modifier - burst_penalty
-                rolls = [random.randint(1, 100) for _ in range(abs(net_modifier) + 1)]
-                roll = min(rolls) if net_modifier > 0 else max(rolls)
-                result = coc_combat_check_result(roll, attack.skill_value)
-                die_text = f"1d100 [{', '.join(str(value) for value in rolls)}]"
-                mode_text = f" (보너스 +{net_modifier})" if net_modifier > 0 else f" (패널티 +{-net_modifier})" if net_modifier < 0 else ""
-                if is_projectile_weapon(weapon) and weapon.ammo is not None:
-                    weapon.ammo -= 1
-                ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
-                line = f"{current.character_name} → {target.character_name} · {weapon.name} {shot_number}발째{mode_text}: {die_text} → {result}{ammo_text}"
-                session.recent_logs.append(line)
+            burst_penalty = shot_number - 1 if is_projectile_weapon(weapon) else 0
+            distance = combat_distance(session, attack.attacker_index, attack.target_index)
+            distance_modifier = 1 if is_projectile_weapon(weapon) and distance == "근거리" else -1 if is_projectile_weapon(weapon) and distance == "먼 거리" else 0
+            net_modifier = distance_modifier - burst_penalty
+            rolls = [random.randint(1, 100) for _ in range(abs(net_modifier) + 1)]
+            roll = min(rolls) if net_modifier > 0 else max(rolls)
+            result = coc_combat_check_result(roll, attack.skill_value)
+            die_text = f"1d100 [{', '.join(str(value) for value in rolls)}]"
+            mode_text = f" (보너스 +{net_modifier})" if net_modifier > 0 else f" (패널티 +{-net_modifier})" if net_modifier < 0 else ""
+            if is_projectile_weapon(weapon) and weapon.ammo is not None:
+                weapon.ammo -= 1
+            ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
+            line = f"{current.character_name} → {target.character_name} · {weapon.name} {shot_number}발째{mode_text}: {die_text} → {result}{ammo_text}"
+            session.recent_logs.append(line)
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            await session.message.edit(content=render_combat_session(session), view=None)
+            await asyncio.sleep(0.7)
+            if result not in {"실패", "대실패"}:
+                attack.hits.append((roll, result, shot_number))
+
+            if weapon.malfunction is not None and roll >= weapon.malfunction:
+                weapon.broken = True
+                luck_value = attack.luck_value
+                luck_roll = random.randint(1, 100)
+                luck_succeeded = luck_value is not None and luck_roll <= luck_value
+                if luck_succeeded:
+                    malfunction_log = f"{weapon.name} 고장 — 행운 [{luck_roll}] / {luck_value}: 성공 · 무기만 고장"
+                else:
+                    luck_display = str(luck_value) if luck_value is not None else "확인 불가"
+                    self_damage, damage_detail = roll_damage_formula(weapon.damage)
+                    current.hp = max(0, current.hp - self_damage)
+                    malfunction_log = (
+                        f"{weapon.name} 고장 — 행운 [{luck_roll}] / {luck_display}: 실패 · "
+                        f"본인 피해 {damage_detail} = {self_damage} · HP {current.hp}/{current.max_hp}"
+                    )
+                session.recent_logs.append(malfunction_log)
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
                 await session.message.edit(content=render_combat_session(session), view=None)
                 await asyncio.sleep(0.7)
-                if result not in {"실패", "대실패"}:
-                    attack.hits.append((roll, result, shot_number))
-
-                if weapon.malfunction is not None and roll >= weapon.malfunction:
-                    weapon.broken = True
-                    luck_value = await registry.get_skill_value(current.character_value, "행운")
-                    luck_roll = random.randint(1, 100)
-                    luck_succeeded = luck_value is not None and luck_roll <= luck_value
-                    if luck_succeeded:
-                        malfunction_log = f"{weapon.name} 고장 — 행운 [{luck_roll}] / {luck_value}: 성공 · 무기만 고장"
-                    else:
-                        luck_display = str(luck_value) if luck_value is not None else "확인 불가"
-                        self_damage, damage_detail = roll_damage_formula(weapon.damage)
-                        current.hp = max(0, current.hp - self_damage)
-                        malfunction_log = (
-                            f"{weapon.name} 고장 — 행운 [{luck_roll}] / {luck_display}: 실패 · "
-                            f"본인 피해 {damage_detail} = {self_damage} · HP {current.hp}/{current.max_hp}"
-                        )
-                    session.recent_logs.append(malfunction_log)
-                    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
-                    await session.message.edit(content=render_combat_session(session), view=None)
-                    await asyncio.sleep(0.7)
-                    break
+                break
         if await finish_combat_if_decided(session):
             return
-        if not attack.hits:
+        if not attack.hits and not is_melee_weapon(weapon):
             await self.complete_attack_turn("공격이 빗나갔어요.")
             return
         needs_response = is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp
         if needs_response:
-            response_choices = "반격 또는 회피" if is_melee_weapon(weapon) else "회피"
+            attack.stage = "defense"
+            session.briefing = (
+                f"{current.character_name}의 공격 판정이 끝났어요. {target.character_name}의 방어 차례예요!"
+                if attack.hits else
+                f"공격이 빗나갔어요. {target.character_name}은 반격하거나 그대로 넘길 수 있어요!"
+            )
+            response_choices = ("반격 또는 회피" if attack.hits else "반격 또는 그대로 넘기기") if is_melee_weapon(weapon) else "회피"
             await session.message.edit(
                 content=render_combat_session(session, f"{target.character_name}: {response_choices} 선택"),
                 view=CombatDefenseView(session),
@@ -1646,6 +1749,8 @@ class CombatView(discord.ui.View):
         attacker = session.participants[attack.attacker_index]
         target = session.participants[attack.target_index]
         weapon = attacker.weapons[attack.weapon_index]
+        attack.stage = "damage"
+        session.briefing = f"{target.character_name}의 피해와 HP를 계산하고 있어요."
         avoided_hit_indexes = avoided_hit_indexes or set()
         for hit_index, (_roll, result, shot_number) in enumerate(attack.hits):
             if hit_index in avoided_hit_indexes:
@@ -1682,6 +1787,8 @@ class CombatView(discord.ui.View):
     async def pass_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         session = self.session
         async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
@@ -1694,17 +1801,24 @@ class CombatView(discord.ui.View):
             session.briefing = f"{with_particle(current.character_name, '가', '이')} 차례를 넘겼어요. 이제 {next_turn.character_name}의 턴이에요!"
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
-    @discord.ui.button(label="전투 종료", style=discord.ButtonStyle.danger, emoji="🏁")
-    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        session = self.session
-        if interaction.user.id != session.owner_id:
-            await interaction.response.send_message("모집을 연 사람만 전투를 종료할 수 있어요.", ephemeral=True)
+class CombatMoveTargetView(CombatActionView):
+    def __init__(self, session: CombatSession, direction: int, targets: list[int]) -> None:
+        super().__init__(session, back=True)
+        self.direction = direction
+        self.target_select = discord.ui.Select(
+            placeholder="거리를 조절할 상대",
+            options=[discord.SelectOption(
+                label=trim_choice_name(session.participants[index].character_name), value=str(index),
+                description=combat_distance(session, session.turn_index, index),
+            ) for index in targets],
+        )
+        self.target_select.callback = self.select_target
+        self.add_item(self.target_select)
+
+    async def select_target(self, interaction: discord.Interaction) -> None:
+        if not await self.ensure_current(interaction):
             return
-        async with session.lock:
-            combat_sessions.pop(session.channel_id, None)
-            session.phase = "finished"
-            await interaction.response.edit_message(content=render_combat_winner(session), view=None)
-        self.stop()
+        await CombatView(self.session).move_distance(interaction, self.direction, int(self.target_select.values[0]))
 
 
 class CombatShotCountSelect(discord.ui.Select):
@@ -1719,6 +1833,8 @@ class CombatShotCountSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         session = self.session
         async with session.lock:
+            if self.view is not None and not await self.view.ensure_current(interaction):
+                return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
@@ -1726,13 +1842,11 @@ class CombatShotCountSelect(discord.ui.Select):
             await interaction.response.defer()
             root_view = CombatView(session)
             await root_view.resolve_weapon(interaction, self.weapon_index, int(self.values[0]))
-            if self.view:
-                self.view.stop()
 
 
-class CombatShotCountView(discord.ui.View):
+class CombatShotCountView(CombatActionView):
     def __init__(self, session: CombatSession, weapon_index: int) -> None:
-        super().__init__(timeout=120)
+        super().__init__(session, back=True)
         self.add_item(CombatShotCountSelect(session, weapon_index))
 
 
@@ -1754,6 +1868,8 @@ class CombatTargetSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         session = self.session
         async with session.lock:
+            if self.view is not None and not await self.view.ensure_current(interaction):
+                return
             attacker = session.participants[session.turn_index]
             if interaction.user.id != attacker.user_id:
                 await interaction.response.send_message(f"지금은 **{attacker.character_name}** 차례예요.", ephemeral=True)
@@ -1764,16 +1880,15 @@ class CombatTargetSelect(discord.ui.Select):
             )
 
 
-class CombatTargetView(discord.ui.View):
+class CombatTargetView(CombatActionView):
     def __init__(self, session: CombatSession, weapon_index: int, shot_count: int, targets: list[int]) -> None:
-        super().__init__(timeout=None)
+        super().__init__(session, back=True)
         self.add_item(CombatTargetSelect(session, weapon_index, shot_count, targets))
 
 
-class CombatDefenseView(discord.ui.View):
+class CombatDefenseView(CombatActionView):
     def __init__(self, session: CombatSession) -> None:
-        super().__init__(timeout=None)
-        self.session = session
+        super().__init__(session)
         attack = session.pending_attack
         if attack is None:
             return
@@ -1783,7 +1898,7 @@ class CombatDefenseView(discord.ui.View):
             counter.callback = self.counter
             self.add_item(counter)
         if not is_firearm_weapon(weapon) or session.participants[attack.target_index].is_pulp:
-            dodge = discord.ui.Button(label="회피", style=discord.ButtonStyle.secondary)
+            dodge = discord.ui.Button(label="회피" if attack.hits else "그대로 넘기기", style=discord.ButtonStyle.secondary)
             dodge.callback = self.dodge
             self.add_item(dodge)
 
@@ -1796,6 +1911,8 @@ class CombatDefenseView(discord.ui.View):
     async def resolve(self, interaction: discord.Interaction, action: str) -> None:
         session = self.session
         async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
             attack = session.pending_attack
             if attack is None:
                 await interaction.response.send_message("이미 처리된 방어 판정이에요.", ephemeral=True)
@@ -1807,18 +1924,39 @@ class CombatDefenseView(discord.ui.View):
                 return
             await interaction.response.defer()
 
+            if action == "회피" and not attack.hits:
+                session.recent_logs.append(f"{defender.character_name} — 공격이 빗나가 회피 굴림 생략")
+                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+                await CombatView(session).complete_attack_turn("공격이 빗나가 피해 없이 넘겼어요.")
+                return
+
             counter_weapon: CombatWeapon | None = None
-            if action == "회피":
-                defense_skill = await registry.get_skill_value(defender.character_value, "회피")
-                defense_skill = defense_skill if defense_skill is not None else defender.dexterity // 2
-            else:
-                counter_weapon = next(
-                    (item for item in defender.weapons if "비무장" in item.name), None
-                ) or CombatWeapon("비무장", "근접전 | 격투", "1d3", damage_bonus="DB")
-                defense_skill = await registry.get_skill_value(
-                    defender.character_value, normalize_weapon_skill_reference(counter_weapon.skill_reference)
-                )
-                defense_skill = defense_skill if defense_skill is not None else 25
+            resolved = None
+            try:
+                resolved = await registry.resolve_character_reference(defender.character_value)
+                if action == "회피":
+                    defense_skill = await registry.get_skill_value(defender.character_value, "회피")
+                else:
+                    counter_weapons = await registry.get_combat_weapons(defender.character_value)
+                    counter_weapon = next((item for item in counter_weapons if "비무장" in item.name), None)
+                    if counter_weapon is None:
+                        raise SheetError("시트에서 비무장 무기를 찾지 못했어요.")
+                    defense_skill = await registry.get_skill_value(
+                        defender.character_value, normalize_weapon_skill_reference(counter_weapon.skill_reference)
+                    )
+                if defense_skill is None:
+                    raise SheetError(f"시트에서 {action} 기능치를 읽지 못했어요.")
+            except Exception as exc:
+                if resolved is not None:
+                    registry._skill_cache.pop(f"{resolved[0]}|{resolved[1]}", None)
+                print(f"Combat defense read failed ({type(exc).__name__}).")
+                session.briefing = f"{defender.character_name}의 {action} 값을 읽지 못했어요. 같은 버튼을 눌러 다시 시도해 주세요."
+                await session.message.edit(content=render_combat_session(session), view=CombatDefenseView(session))
+                await interaction.followup.send("판정과 피해를 진행하지 않았어요. 시트 연결과 값을 확인한 뒤 다시 눌러 주세요.", ephemeral=True)
+                return
+
+            attack.stage = "resolving"
+            session.briefing = f"{defender.character_name}의 {action} 판정을 처리하고 있어요."
 
             roll = random.randint(1, 100)
             result = coc_combat_check_result(roll, defense_skill)
@@ -1850,6 +1988,7 @@ class CombatDefenseView(discord.ui.View):
                     f"반격 성공 — {attacker.character_name} 피해 {detail} = {damage} · HP {attacker.hp}/{attacker.max_hp}{state}"
                 )
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+                session.briefing = f"{defender.character_name}의 반격이 성공했어요. 피해를 적용하고 있어요."
                 await session.message.edit(content=render_combat_session(session), view=None)
                 await asyncio.sleep(0.7)
                 turn_summary = f"{defender.character_name}의 반격이 성공했어요."

@@ -1314,6 +1314,35 @@ async def refresh_combat_turn_weapons(session: CombatSession) -> None:
         session.briefing += " 무기 갱신에 실패해 기존 목록으로 진행해요. 다음 차례에 다시 갱신할게요."
 
 
+async def repost_combat_turn(session: CombatSession) -> None:
+    previous = session.message
+    if previous is None:
+        raise RuntimeError("Combat message is missing")
+    # Use the bot-authenticated message endpoint even for an old slash-command response.
+    old_message = previous.channel.get_partial_message(previous.id)
+    content = render_combat_session(session)
+    view = CombatView(session)
+    try:
+        new_message = await previous.channel.send(
+            content, view=view, allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except (discord.HTTPException, OSError) as exc:
+        print(f"Combat panel repost failed ({type(exc).__name__}).")
+        session.message = await old_message.edit(content=content, view=view)
+        return
+    session.message = new_message
+    try:
+        await old_message.delete()
+    except discord.NotFound:
+        pass
+    except (discord.HTTPException, OSError) as exc:
+        print(f"Old combat panel deletion failed ({type(exc).__name__}).")
+        try:
+            await old_message.edit(content="전투창이 아래의 새 메시지로 이동했어요.", view=None)
+        except (discord.HTTPException, OSError):
+            pass
+
+
 def roll_damage_formula(formula: str) -> tuple[int, str]:
     """Roll only the weapon's listed damage dice, without adding a damage bonus."""
     cleaned = re.sub(r"\(\s*치\s*\)", "", formula, flags=re.IGNORECASE).strip()
@@ -1472,7 +1501,7 @@ class CombatLobbyView(discord.ui.View):
                 session.round_number = 1
                 session.turn_index = 0
                 session.briefing = f"전투 시작! {session.participants[0].character_name}의 턴이에요!"
-                await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
+                await repost_combat_turn(session)
         except Exception as exc:
             print(f"Combat start failed ({type(exc).__name__}).")
             await interaction.followup.send("캐릭터 시트에서 민첩·근력·건강·크기 값을 읽지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
@@ -1509,6 +1538,7 @@ class CombatActionView(discord.ui.View):
     async def ensure_current(self, interaction: discord.Interaction) -> bool:
         session = self.session
         if (combat_sessions.get(session.channel_id) is not session or session.phase != "combat"
+                or session.message is None or interaction.message.id != session.message.id
                 or session.turn_index != self.turn_index or session.pending_attack is not self.attack
                 or (self.attack is not None and self.attack.stage != "defense")):
             await interaction.response.send_message("이미 처리된 선택이에요. 현재 화면을 확인해 주세요.", ephemeral=True)
@@ -1655,7 +1685,9 @@ class CombatView(CombatActionView):
                 )
             if not succeeded:
                 await refresh_combat_turn_weapons(session)
-            await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
+                await repost_combat_turn(session)
+            else:
+                await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
         session = self.session
@@ -1916,7 +1948,7 @@ class CombatView(CombatActionView):
         next_turn = session.participants[session.turn_index]
         session.briefing = f"{summary} 이제 {next_turn.character_name}의 턴이에요!"
         await refresh_combat_turn_weapons(session)
-        await session.message.edit(content=render_combat_session(session), view=CombatView(session))
+        await repost_combat_turn(session)
 
 
     @discord.ui.button(label="차례 넘기기", style=discord.ButtonStyle.secondary, row=4)
@@ -1936,7 +1968,7 @@ class CombatView(CombatActionView):
             next_turn = session.participants[session.turn_index]
             session.briefing = f"{with_particle(current.character_name, '가', '이')} 차례를 넘겼어요. 이제 {next_turn.character_name}의 턴이에요!"
             await refresh_combat_turn_weapons(session)
-            await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
+            await repost_combat_turn(session)
 
 class CombatMoveTargetView(CombatActionView):
     def __init__(self, session: CombatSession, direction: int, targets: list[int]) -> None:

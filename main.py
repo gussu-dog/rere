@@ -1042,6 +1042,7 @@ class CombatSession:
     phase: str = "lobby"
     round_number: int = 1
     turn_index: int = 0
+    distance: str = "보통거리"
     initiative_logs: list[str] = field(default_factory=list)
     recent_logs: list[str] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1070,11 +1071,12 @@ def render_combat_session(session: CombatSession) -> str:
     return (
         f"**전투 시뮬레이션을 시작할게요!**\n"
         f"**{session.round_number}라운드 · 현재 차례:** {current.character_name} ({current.player_name})\n"
+        f"**현재 거리:** {session.distance}\n"
         "\n"
         f"**참가자 · 민첩 순**\n{roster}\n\n"
         f"**민첩 동률 판정**\n{initiative}\n\n"
         f"**최근 굴림 (최대 4회)**\n{logs}\n\n"
-        "현재는 무기 선택과 참조 기능치의 명중 판정을 확인하는 단계예요. 방어·피해·체력 계산은 아직 적용하지 않아요."
+        "무기를 선택하거나 거리를 조절할 수 있어요. 사격·투척은 근거리에서 보너스, 먼 거리에서 패널티를 받아요."
     )
 
 
@@ -1149,6 +1151,17 @@ def sort_combat_initiative(participants: list[CombatParticipant]) -> tuple[list[
 def is_projectile_weapon(weapon: CombatWeapon) -> bool:
     reference = f"{weapon.skill_reference} {weapon.name}".casefold()
     return "사격" in reference or "투척" in reference
+
+
+def is_melee_weapon(weapon: CombatWeapon) -> bool:
+    return "근접전" in weapon.skill_reference.casefold()
+
+
+def advance_combat_turn(session: CombatSession) -> None:
+    session.turn_index += 1
+    if session.turn_index >= len(session.participants):
+        session.turn_index = 0
+        session.round_number += 1
 
 
 def roll_damage_formula(formula: str) -> tuple[int, str]:
@@ -1237,6 +1250,10 @@ class CombatLobbyView(discord.ui.View):
 class CombatWeaponSelect(discord.ui.Select):
     def __init__(self, session: CombatSession) -> None:
         current = session.participants[session.turn_index]
+        available = [
+            (index, weapon) for index, weapon in enumerate(current.weapons)
+            if session.distance == "근거리" or not is_melee_weapon(weapon)
+        ]
         options = [
             discord.SelectOption(
                 label=trim_choice_name(f"{weapon.name} — {weapon.skill_reference}"),
@@ -1247,7 +1264,7 @@ class CombatWeaponSelect(discord.ui.Select):
                     + (" · 고장" if weapon.broken else "")
                 ),
             )
-            for index, weapon in enumerate(current.weapons[:25])
+            for index, weapon in available[:25]
         ]
         super().__init__(placeholder="사용할 무기를 선택해 주세요", min_values=1, max_values=1, options=options)
         self.session = session
@@ -1263,10 +1280,56 @@ class CombatView(discord.ui.View):
         super().__init__(timeout=None)
         self.session = session
         current = session.participants[session.turn_index]
-        if current.weapons:
+        available_weapons = [weapon for weapon in current.weapons if session.distance == "근거리" or not is_melee_weapon(weapon)]
+        if available_weapons:
             self.add_item(CombatWeaponSelect(session))
+        elif session.distance != "근거리" and any(is_melee_weapon(weapon) for weapon in current.weapons):
+            self.add_item(discord.ui.Button(label="근접전은 근거리에서 가능해요", style=discord.ButtonStyle.secondary, disabled=True))
         else:
             self.add_item(discord.ui.Button(label="시트에서 무기를 찾지 못했어요", style=discord.ButtonStyle.secondary, disabled=True))
+        close_button = discord.ui.Button(label="거리 좁히기", style=discord.ButtonStyle.primary, row=2, disabled=session.distance == "근거리")
+        close_button.callback = self.close_distance
+        self.add_item(close_button)
+        widen_button = discord.ui.Button(label="거리 넓히기", style=discord.ButtonStyle.secondary, row=2, disabled=session.distance == "먼 거리")
+        widen_button.callback = self.widen_distance
+        self.add_item(widen_button)
+
+    async def close_distance(self, interaction: discord.Interaction) -> None:
+        await self.move_distance(interaction, -1)
+
+    async def widen_distance(self, interaction: discord.Interaction) -> None:
+        await self.move_distance(interaction, 1)
+
+    async def move_distance(self, interaction: discord.Interaction, direction: int) -> None:
+        session = self.session
+        async with session.lock:
+            current = session.participants[session.turn_index]
+            if interaction.user.id != current.user_id:
+                await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
+                return
+            distance_order = ["근거리", "보통거리", "먼 거리"]
+            old_index = distance_order.index(session.distance)
+            new_index = min(max(old_index + direction, 0), len(distance_order) - 1)
+            if new_index == old_index:
+                await interaction.response.send_message("더 이동할 수 없는 거리예요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            roll = random.randint(1, 100)
+            succeeded = roll <= current.dexterity
+            session.distance = distance_order[new_index]
+            outcome = "성공" if succeeded else "실패"
+            log = (
+                f"• {current.character_name} — 거리 이동 민첩 판정 `1d100 [{roll}]` / "
+                f"민첩 {current.dexterity}: {outcome} · {session.distance}"
+            )
+            if succeeded:
+                log += " · 이동에 성공해 공격할 수 있어요."
+            else:
+                log += " · 이동은 했지만 공격하지 못하고 차례가 넘어가요."
+                advance_combat_turn(session)
+            session.recent_logs.append(log)
+            session.recent_logs = session.recent_logs[-4:]
+            await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
         session = self.session
@@ -1279,6 +1342,9 @@ class CombatView(discord.ui.View):
                 await interaction.response.send_message("무기 선택이 만료됐어요. 화면을 새로 확인해 주세요.", ephemeral=True)
                 return
             weapon = current.weapons[weapon_index]
+            if is_melee_weapon(weapon) and session.distance != "근거리":
+                await interaction.response.send_message("근접전 무기는 근거리에서만 사용할 수 있어요.", ephemeral=True)
+                return
             if weapon.broken:
                 await interaction.response.send_message(f"`{weapon.name}`은(는) 고장 나서 사용할 수 없어요.", ephemeral=True)
                 return
@@ -1315,12 +1381,14 @@ class CombatView(discord.ui.View):
 
             shot_logs: list[str] = []
             for shot_number in range(1, shot_count + 1):
-                penalty_dice = shot_number - 1 if is_projectile_weapon(weapon) else 0
-                rolls = [random.randint(1, 100) for _ in range(penalty_dice + 1)]
-                roll = max(rolls) if penalty_dice else rolls[0]
+                burst_penalty = shot_number - 1 if is_projectile_weapon(weapon) else 0
+                distance_modifier = 1 if is_projectile_weapon(weapon) and session.distance == "근거리" else -1 if is_projectile_weapon(weapon) and session.distance == "먼 거리" else 0
+                net_modifier = distance_modifier - burst_penalty
+                rolls = [random.randint(1, 100) for _ in range(abs(net_modifier) + 1)]
+                roll = min(rolls) if net_modifier > 0 else max(rolls)
                 result = coc_combat_check_result(roll, skill_value)
                 die_text = f"`1d100 [{', '.join(str(value) for value in rolls)}]`"
-                mode_text = f" (패널티 +{penalty_dice})" if penalty_dice else ""
+                mode_text = f" (보너스 +{net_modifier})" if net_modifier > 0 else f" (패널티 +{-net_modifier})" if net_modifier < 0 else ""
                 line = f"{shot_number}발째{mode_text}: {die_text} → **{result}**"
                 if is_projectile_weapon(weapon) and weapon.ammo is not None:
                     weapon.ammo -= 1
@@ -1351,10 +1419,7 @@ class CombatView(discord.ui.View):
                 + "\n  ".join(shot_logs)
             )
             session.recent_logs = session.recent_logs[-4:]
-            session.turn_index += 1
-            if session.turn_index >= len(session.participants):
-                session.turn_index = 0
-                session.round_number += 1
+            advance_combat_turn(session)
             await session.message.edit(content=render_combat_session(session), view=CombatView(session))
         except SheetError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
@@ -1374,10 +1439,7 @@ class CombatView(discord.ui.View):
             await interaction.response.defer()
             session.recent_logs.append(f"• {current.character_name} — 차례를 넘겼어요.")
             session.recent_logs = session.recent_logs[-4:]
-            session.turn_index += 1
-            if session.turn_index >= len(session.participants):
-                session.turn_index = 0
-                session.round_number += 1
+            advance_combat_turn(session)
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     @discord.ui.button(label="전투 종료", style=discord.ButtonStyle.danger, emoji="🏁")

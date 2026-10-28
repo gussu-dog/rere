@@ -6,7 +6,7 @@ import os
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, DivisionByZero, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -931,6 +931,242 @@ async def skill_autocomplete(interaction: discord.Interaction, current: str) -> 
 async def roll_mode_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     modes = [("패널티 +1", "패널티+1"), ("패널티 +2", "패널티+2"), ("보너스 +1", "보너스+1"), ("보너스 +2", "보너스+2")]
     return [app_commands.Choice(name=name, value=value) for name, value in modes if not current or current.casefold() in name.casefold() or current.casefold() in value.casefold()]
+
+
+@dataclass
+class CombatParticipant:
+    user_id: int
+    player_name: str
+    character_value: str
+    character_name: str
+    dexterity: int = 0
+
+
+@dataclass
+class CombatSession:
+    guild_id: int
+    channel_id: int
+    owner_id: int
+    participants: list[CombatParticipant]
+    message: discord.Message | None = None
+    phase: str = "lobby"
+    round_number: int = 1
+    turn_index: int = 0
+    recent_logs: list[str] = field(default_factory=list)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+combat_sessions: dict[int, CombatSession] = {}
+
+
+def render_combat_session(session: CombatSession) -> str:
+    roster = "\n".join(
+        f"• {member.character_name} — {member.player_name}"
+        + (f" (민첩 {member.dexterity})" if session.phase == "combat" else "")
+        for member in session.participants
+    ) or "아직 참가자가 없어요. `/전투참여`로 캐릭터를 등록해 주세요!"
+    if session.phase == "lobby":
+        return (
+            "**모의전투 참가자를 모집할게요!**\n"
+            "참가할 캐릭터는 `/전투참여`로 등록해 주세요. 한 채널에서는 모집을 하나만 열 수 있어요.\n\n"
+            f"**참가자 ({len(session.participants)}/8)**\n{roster}"
+        )
+
+    current = session.participants[session.turn_index]
+    logs = "\n".join(session.recent_logs) or "아직 굴림 기록이 없어요."
+    return (
+        f"**전투 시뮬레이션을 시작할게요!**\n"
+        f"**{session.round_number}라운드 · 현재 차례:** {current.character_name} ({current.player_name})\n"
+        "\n"
+        f"**참가자 · 민첩 순**\n{roster}\n\n"
+        f"**최근 굴림 (최대 4회)**\n{logs}\n\n"
+        "현재 시제품은 민첩 순서와 기능 판정을 확인하는 단계예요. 피해와 체력 계산은 아직 적용하지 않아요."
+    )
+
+
+def coc_combat_check_result(roll: int, skill_value: int) -> str:
+    if roll == 1:
+        return "대성공"
+    if (skill_value < 50 and roll >= 95) or (skill_value >= 50 and roll == 100):
+        return "대실패"
+    if roll <= skill_value // 5:
+        return "극단적 성공"
+    if roll <= skill_value // 2:
+        return "어려운 성공"
+    if roll <= skill_value:
+        return "보통 성공"
+    return "실패"
+
+
+class CombatLobbyView(discord.ui.View):
+    def __init__(self, session: CombatSession) -> None:
+        super().__init__(timeout=None)
+        self.session = session
+
+    @discord.ui.button(label="전투 시작", style=discord.ButtonStyle.primary, emoji="⚔️")
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        session = self.session
+        if interaction.user.id != session.owner_id:
+            await interaction.response.send_message("모집을 연 사람만 전투를 시작할 수 있어요.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            async with session.lock:
+                if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
+                    await interaction.followup.send("이 모집은 이미 종료됐어요.", ephemeral=True)
+                    return
+                if not session.participants:
+                    await interaction.followup.send("먼저 `/전투참여`로 캐릭터를 한 명 이상 참가시켜 주세요!", ephemeral=True)
+                    return
+                for member in session.participants:
+                    member.dexterity = await registry.get_skill_value(member.character_value, "민첩") or 0
+                session.participants.sort(key=lambda member: member.dexterity, reverse=True)
+                session.phase = "combat"
+                session.round_number = 1
+                session.turn_index = 0
+                await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
+        except Exception as exc:
+            print(f"Combat start failed ({type(exc).__name__}).")
+            await interaction.followup.send("캐릭터 시트에서 민첩을 읽지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
+
+    @discord.ui.button(label="모집 취소", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        session = self.session
+        if interaction.user.id != session.owner_id:
+            await interaction.response.send_message("모집을 연 사람만 취소할 수 있어요.", ephemeral=True)
+            return
+        async with session.lock:
+            combat_sessions.pop(session.channel_id, None)
+            await interaction.response.edit_message(content="모의전투 모집을 취소했어요.", view=None)
+        self.stop()
+
+
+class CombatView(discord.ui.View):
+    def __init__(self, session: CombatSession) -> None:
+        super().__init__(timeout=None)
+        self.session = session
+
+    async def _roll_action(self, interaction: discord.Interaction, skill: str) -> None:
+        session = self.session
+        async with session.lock:
+            current = session.participants[session.turn_index]
+            if interaction.user.id != current.user_id:
+                await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            try:
+                skill_value = await registry.get_skill_value(current.character_value, skill)
+                if skill_value is None:
+                    await interaction.followup.send(f"시트에서 `{skill}` 기능치를 찾지 못했어요.", ephemeral=True)
+                    return
+                roll = random.randint(1, 100)
+                result = coc_combat_check_result(roll, skill_value)
+                session.recent_logs.append(f"• {current.character_name} — {skill} ({skill_value}): `1d100 [{roll}]` → **{result}**")
+                session.recent_logs = session.recent_logs[-4:]
+                session.turn_index += 1
+                if session.turn_index >= len(session.participants):
+                    session.turn_index = 0
+                    session.round_number += 1
+                await interaction.message.edit(content=render_combat_session(session), view=self)
+            except SheetError as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+            except Exception as exc:
+                print(f"Combat action failed ({type(exc).__name__}).")
+                await interaction.followup.send("굴림을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
+
+    @discord.ui.button(label="근접전 판정", style=discord.ButtonStyle.primary, emoji="⚔️")
+    async def melee_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._roll_action(interaction, "근접전")
+
+    @discord.ui.button(label="회피 판정", style=discord.ButtonStyle.success, emoji="🛡️")
+    async def dodge_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._roll_action(interaction, "회피")
+
+    @discord.ui.button(label="사격 판정", style=discord.ButtonStyle.secondary, emoji="🎯")
+    async def firearms_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._roll_action(interaction, "사격")
+
+    @discord.ui.button(label="차례 넘기기", style=discord.ButtonStyle.secondary, emoji="⏭️")
+    async def pass_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        session = self.session
+        async with session.lock:
+            current = session.participants[session.turn_index]
+            if interaction.user.id != current.user_id:
+                await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            session.recent_logs.append(f"• {current.character_name} — 차례를 넘겼어요.")
+            session.recent_logs = session.recent_logs[-4:]
+            session.turn_index += 1
+            if session.turn_index >= len(session.participants):
+                session.turn_index = 0
+                session.round_number += 1
+            await interaction.message.edit(content=render_combat_session(session), view=self)
+
+    @discord.ui.button(label="전투 종료", style=discord.ButtonStyle.danger, emoji="🏁")
+    async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        session = self.session
+        if interaction.user.id != session.owner_id:
+            await interaction.response.send_message("모집을 연 사람만 전투를 종료할 수 있어요.", ephemeral=True)
+            return
+        async with session.lock:
+            combat_sessions.pop(session.channel_id, None)
+            await interaction.response.edit_message(content="모의전투를 종료했어요.", view=None)
+        self.stop()
+
+
+@bot.tree.command(name="모의전투", description="이 채널에서 모의전투 참가자를 모집해요!")
+@app_commands.guild_only()
+async def start_combat(interaction: discord.Interaction) -> None:
+    channel_id = interaction.channel_id
+    if channel_id in combat_sessions:
+        await send_response(interaction, "이 채널에는 이미 진행 중인 모의전투가 있어요.", ephemeral=True)
+        return
+    session = CombatSession(
+        guild_id=interaction.guild_id or 0,
+        channel_id=channel_id,
+        owner_id=interaction.user.id,
+        participants=[],
+    )
+    combat_sessions[channel_id] = session
+    await interaction.response.send_message(render_combat_session(session), view=CombatLobbyView(session))
+    session.message = await interaction.original_response()
+
+
+@bot.tree.command(name="전투참여", description="등록한 캐릭터를 이 채널의 모의전투에 참가시켜요!")
+@app_commands.guild_only()
+@app_commands.rename(character="캐릭터")
+@app_commands.autocomplete(character=character_autocomplete)
+async def join_combat(interaction: discord.Interaction, character: str) -> None:
+    session = combat_sessions.get(interaction.channel_id)
+    if session is None or session.phase != "lobby":
+        await send_response(interaction, "이 채널에 모집 중인 모의전투가 없어요. 먼저 `/모의전투`를 실행해 주세요!", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    owned = await registry.get_character_choices_for_user(interaction.user.id)
+    selected = next((value for value, _ in owned if value.casefold() == character.casefold()), None)
+    if selected is None:
+        await interaction.followup.send("직접 등록한 캐릭터만 참가시킬 수 있어요. 캐릭터 선택 목록에서 골라 주세요.", ephemeral=True)
+        return
+    resolved = await registry.resolve_character_reference(selected)
+    if resolved is None:
+        await interaction.followup.send("캐릭터 시트를 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요.", ephemeral=True)
+        return
+    display_name = selected.partition("|")[2].strip()
+    async with session.lock:
+        if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
+            await interaction.followup.send("모집이 이미 끝났어요.", ephemeral=True)
+            return
+        if len(session.participants) >= 8:
+            await interaction.followup.send("모의전투에는 캐릭터를 최대 8명까지 참가시킬 수 있어요.", ephemeral=True)
+            return
+        if any(member.character_value.casefold() == selected.casefold() for member in session.participants):
+            await interaction.followup.send("이 캐릭터는 이미 참가했어요.", ephemeral=True)
+            return
+        session.participants.append(CombatParticipant(interaction.user.id, interaction.user.display_name, selected, display_name))
+        if session.message is not None:
+            await session.message.edit(content=render_combat_session(session), view=CombatLobbyView(session))
+    await interaction.followup.send(f"**{display_name}** 캐릭터가 모의전투에 참가했어요!", ephemeral=True)
 
 
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")

@@ -1145,8 +1145,8 @@ def combat_is_active(member: CombatParticipant) -> bool:
 
 
 def active_combat_statuses(session: CombatSession, member: CombatParticipant) -> list[CombatStatusEffect]:
-    return [effect for effect in member.status_effects
-            if "충격" not in effect.spec.kinds or combat_is_active(session.participants[effect.source_index])]
+    # Statuses persist across turns and source elimination until their escape check succeeds.
+    return list(member.status_effects)
 
 
 def combat_is_shocked(session: CombatSession, member: CombatParticipant) -> bool:
@@ -1154,7 +1154,7 @@ def combat_is_shocked(session: CombatSession, member: CombatParticipant) -> bool
 
 
 def maintaining_combat_shock(session: CombatSession | None, member: CombatParticipant) -> bool:
-    if session is None:
+    if session is None or not combat_is_active(member):
         return False
     return any(
         combat_is_active(target) and any(
@@ -1593,8 +1593,6 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
 def apply_combat_weapon_statuses(session: CombatSession, attacker: CombatParticipant, target: CombatParticipant, weapon: CombatWeapon) -> None:
     source_index = next(index for index, member in enumerate(session.participants) if member is attacker)
     for spec in weapon.effects:
-        if "충격" in spec.kinds and not combat_is_active(attacker):
-            continue
         target.status_effects = [effect for effect in active_combat_statuses(session, target)
                                  if not (effect.source_index == source_index and effect.weapon.name == weapon.name
                                          and set(effect.spec.kinds) == set(spec.kinds) and effect.spec.escape_skill == spec.escape_skill)]

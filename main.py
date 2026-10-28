@@ -179,12 +179,20 @@ class RegisteredSpreadsheet:
 
 
 @dataclass
+class CombatWeapon:
+    name: str
+    skill_reference: str
+    damage: str
+
+
+@dataclass
 class CachedSkillData:
     values: dict[str, int]
     invested_points: dict[str, int] | None
     emote_key: str | None
     occupation: str | None
     expires_at: float
+    weapons: list[CombatWeapon] = field(default_factory=list)
 
 
 class SheetRegistry:
@@ -364,6 +372,10 @@ class SheetRegistry:
                 return dexterity // 2
         return next((value for key, value in CHECK_DEFAULT_SKILL_VALUES.items() if key.casefold() == skill_name.casefold()), None)
 
+    async def get_combat_weapons(self, character_value: str) -> list[CombatWeapon]:
+        data = await self._get_skill_data(character_value)
+        return list(data.weapons) if data else []
+
     async def get_character_emote_name(self, character_value: str, succeeded: bool) -> str | None:
         data = await self._get_skill_data(character_value)
         if not data or not data.emote_key:
@@ -394,9 +406,9 @@ class SheetRegistry:
             escaped_tab = tab.replace("'", "''")
             use_sorted_table = spreadsheet_id == SORTED_TABLE_SPREADSHEET_ID
             ranges = (
-                [f"'{escaped_tab}'!A1:AN18", f"'{escaped_tab}'!B129:M200", f"'{escaped_tab}'!O21:AL27", f"'{escaped_tab}'!AE12"]
+                [f"'{escaped_tab}'!A1:AN18", f"'{escaped_tab}'!B129:M200", f"'{escaped_tab}'!O21:AL27", f"'{escaped_tab}'!A83:AN115", f"'{escaped_tab}'!AE12"]
                 if use_sorted_table else
-                [f"'{escaped_tab}'!A1:AN18", f"'{escaped_tab}'!S3:AH7", f"'{escaped_tab}'!C19:N80", f"'{escaped_tab}'!P19:AA80", f"'{escaped_tab}'!AC19:AN80", f"'{escaped_tab}'!AE9"]
+                [f"'{escaped_tab}'!A1:AN18", f"'{escaped_tab}'!S3:AH7", f"'{escaped_tab}'!C19:N80", f"'{escaped_tab}'!P19:AA80", f"'{escaped_tab}'!AC19:AN80", f"'{escaped_tab}'!A41:AN70", f"'{escaped_tab}'!AE9"]
             )
             url = f"https://sheets.googleapis.com/v4/spreadsheets/{quote(spreadsheet_id, safe='')}/values:batchGet"
             params = [("valueRenderOption", "FORMATTED_VALUE"), *(('ranges', item) for item in ranges), ("key", self.api_key)]
@@ -412,7 +424,8 @@ class SheetRegistry:
                 values["이성"] = sanity_value
             emote_key = self._parse_emote_key(value_ranges)
             occupation = self._parse_occupation(value_ranges)
-            cached = CachedSkillData(values, invested_points, emote_key, occupation, time.monotonic() + 60)
+            weapons = self._parse_combat_weapons(value_ranges, use_sorted_table)
+            cached = CachedSkillData(values, invested_points, emote_key, occupation, time.monotonic() + 60, weapons)
             self._skill_cache[cache_key] = cached
             return cached
 
@@ -481,7 +494,7 @@ class SheetRegistry:
     @classmethod
     def _parse_skill_values(cls, value_ranges: list[dict[str, Any]]) -> dict[str, int]:
         result: dict[str, int] = {}
-        for range_index in range(2, len(value_ranges)):
+        for range_index in (2, 3, 4):
             for cells in cls._range_rows(value_ranges, range_index):
                 if len(cells) < 10:
                     continue
@@ -500,7 +513,7 @@ class SheetRegistry:
     @classmethod
     def _parse_invested_points(cls, value_ranges: list[dict[str, Any]]) -> dict[str, int]:
         result: dict[str, int] = {}
-        for range_index in range(2, len(value_ranges)):
+        for range_index in (2, 3, 4):
             for cells in cls._range_rows(value_ranges, range_index):
                 if len(cells) < 10 or parse_int(cells[9]) is None:
                     continue
@@ -550,6 +563,38 @@ class SheetRegistry:
                 add_skill(result, name, value)
         return result
 
+    @classmethod
+    def _parse_combat_weapons(cls, value_ranges: list[dict[str, Any]], use_sorted_table: bool) -> list[CombatWeapon]:
+        range_index = 3 if use_sorted_table else 5
+        rows = cls._range_rows(value_ranges, range_index)
+        header_index = next((
+            index for index, row in enumerate(rows)
+            if any(cell.strip().casefold() == "기능" for cell in row)
+            and any(cell.strip().casefold() == "피해" for cell in row)
+        ), None)
+        if header_index is None:
+            return []
+
+        header = [cell.strip().casefold() for cell in rows[header_index]]
+        skill_index = next((index for index, value in enumerate(header) if value == "기능"), None)
+        damage_index = next((index for index, value in enumerate(header) if value == "피해"), None)
+        name_index = next((index for index, value in enumerate(header) if value == "무기 이름"), None)
+        fallback_name_index = next((index for index, value in enumerate(header) if value in {"무기 종류", "장비"}), None)
+        if skill_index is None or damage_index is None or (name_index is None and fallback_name_index is None):
+            return []
+
+        weapons: list[CombatWeapon] = []
+        for row in rows[header_index + 1:]:
+            explicit_name = row[name_index].strip() if name_index is not None and name_index < len(row) else ""
+            fallback_name = row[fallback_name_index].strip() if fallback_name_index is not None and fallback_name_index < len(row) else ""
+            skill_reference = row[skill_index].strip() if skill_index < len(row) else ""
+            damage = row[damage_index].strip() if damage_index < len(row) else ""
+            name = explicit_name or fallback_name
+            if not name or not skill_reference or name.casefold() in {"무기", "장비"}:
+                continue
+            weapons.append(CombatWeapon(name, skill_reference, damage or "미기재"))
+        return weapons
+
 
 def trim_choice_name(value: str) -> str:
     return value if len(value) <= 100 else value[:97] + "…"
@@ -570,6 +615,17 @@ def parse_int(value: Any) -> int | None:
         return int(text)
     except (ValueError, TypeError):
         return None
+
+
+def normalize_weapon_skill_reference(reference: str) -> str:
+    text = " ".join(reference.strip().split())
+    parenthesized = re.fullmatch(r"(.+?)\s*[（(]\s*(.+?)\s*[）)]", text)
+    if parenthesized:
+        return f"{parenthesized.group(1).strip()} | {parenthesized.group(2).strip()}"
+    separated = re.fullmatch(r"(.+?)\s*[:：|]\s*(.+)", text)
+    if separated:
+        return f"{separated.group(1).strip()} | {separated.group(2).strip()}"
+    return text
 
 
 def has_casefold_key(values: dict[str, Any], wanted: str) -> bool:
@@ -940,6 +996,7 @@ class CombatParticipant:
     character_value: str
     character_name: str
     dexterity: int = 0
+    weapons: list[CombatWeapon] = field(default_factory=list)
 
 
 @dataclass
@@ -984,7 +1041,7 @@ def render_combat_session(session: CombatSession) -> str:
         f"**참가자 · 민첩 순**\n{roster}\n\n"
         f"**민첩 동률 판정**\n{initiative}\n\n"
         f"**최근 굴림 (최대 4회)**\n{logs}\n\n"
-        "현재 시제품은 민첩 순서와 기능 판정을 확인하는 단계예요. 피해와 체력 계산은 아직 적용하지 않아요."
+        "현재는 무기 선택과 참조 기능치의 명중 판정을 확인하는 단계예요. 방어·피해·체력 계산은 아직 적용하지 않아요."
     )
 
 
@@ -1076,8 +1133,18 @@ class CombatLobbyView(discord.ui.View):
                 if not session.participants:
                     await interaction.followup.send("먼저 `/모의전투 참여`로 캐릭터를 한 명 이상 참가시켜 주세요!", ephemeral=True)
                     return
-                for member in session.participants:
-                    member.dexterity = await registry.get_skill_value(member.character_value, "민첩") or 0
+
+                async def load_combat_data(member: CombatParticipant) -> tuple[int | None, list[CombatWeapon]]:
+                    dexterity, weapons = await asyncio.gather(
+                        registry.get_skill_value(member.character_value, "민첩"),
+                        registry.get_combat_weapons(member.character_value),
+                    )
+                    return dexterity, weapons
+
+                combat_data = await asyncio.gather(*(load_combat_data(member) for member in session.participants))
+                for member, (dexterity, weapons) in zip(session.participants, combat_data):
+                    member.dexterity = dexterity or 0
+                    member.weapons = weapons
                 session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
                 session.phase = "combat"
                 session.round_number = 1
@@ -1099,50 +1166,74 @@ class CombatLobbyView(discord.ui.View):
         self.stop()
 
 
+class CombatWeaponSelect(discord.ui.Select):
+    def __init__(self, session: CombatSession) -> None:
+        current = session.participants[session.turn_index]
+        options = [
+            discord.SelectOption(
+                label=trim_choice_name(f"{weapon.name} — {weapon.skill_reference}"),
+                value=str(index),
+                description=trim_choice_name(f"피해: {weapon.damage}"),
+            )
+            for index, weapon in enumerate(current.weapons[:25])
+        ]
+        super().__init__(placeholder="사용할 무기를 선택해 주세요", min_values=1, max_values=1, options=options)
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if isinstance(view, CombatView):
+            await view.select_weapon(interaction, int(self.values[0]))
+
+
 class CombatView(discord.ui.View):
     def __init__(self, session: CombatSession) -> None:
         super().__init__(timeout=None)
         self.session = session
+        current = session.participants[session.turn_index]
+        if current.weapons:
+            self.add_item(CombatWeaponSelect(session))
+        else:
+            self.add_item(discord.ui.Button(label="시트에서 무기를 찾지 못했어요", style=discord.ButtonStyle.secondary, disabled=True))
 
-    async def _roll_action(self, interaction: discord.Interaction, skill: str) -> None:
+    async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
         session = self.session
         async with session.lock:
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
+            if not 0 <= weapon_index < len(current.weapons):
+                await interaction.response.send_message("무기 선택이 만료됐어요. 화면을 새로 확인해 주세요.", ephemeral=True)
+                return
             await interaction.response.defer()
+            weapon = current.weapons[weapon_index]
+            skill_name = normalize_weapon_skill_reference(weapon.skill_reference)
             try:
-                skill_value = await registry.get_skill_value(current.character_value, skill)
+                skill_value = await registry.get_skill_value(current.character_value, skill_name)
                 if skill_value is None:
-                    await interaction.followup.send(f"시트에서 `{skill}` 기능치를 찾지 못했어요.", ephemeral=True)
+                    await interaction.followup.send(
+                        f"무기 `{weapon.name}`의 참조 기능치 `{weapon.skill_reference}`를 시트에서 찾지 못했어요."
+                        " 기능치 표기와 기능치 값을 확인해 주세요.",
+                        ephemeral=True,
+                    )
                     return
                 roll = random.randint(1, 100)
                 result = coc_combat_check_result(roll, skill_value)
-                session.recent_logs.append(f"• {current.character_name} — {skill} ({skill_value}): `1d100 [{roll}]` → **{result}**")
+                session.recent_logs.append(
+                    f"• {current.character_name} — {weapon.name} / {skill_name} ({skill_value}): `1d100 [{roll}]` → **{result}**"
+                )
                 session.recent_logs = session.recent_logs[-4:]
                 session.turn_index += 1
                 if session.turn_index >= len(session.participants):
                     session.turn_index = 0
                     session.round_number += 1
-                await interaction.message.edit(content=render_combat_session(session), view=self)
+                await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
             except SheetError as exc:
                 await interaction.followup.send(str(exc), ephemeral=True)
             except Exception as exc:
-                print(f"Combat action failed ({type(exc).__name__}).")
+                print(f"Combat weapon action failed ({type(exc).__name__}).")
                 await interaction.followup.send("굴림을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
-
-    @discord.ui.button(label="근접전 판정", style=discord.ButtonStyle.primary, emoji="⚔️")
-    async def melee_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._roll_action(interaction, "근접전")
-
-    @discord.ui.button(label="회피 판정", style=discord.ButtonStyle.success, emoji="🛡️")
-    async def dodge_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._roll_action(interaction, "회피")
-
-    @discord.ui.button(label="사격 판정", style=discord.ButtonStyle.secondary, emoji="🎯")
-    async def firearms_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._roll_action(interaction, "사격")
 
     @discord.ui.button(label="차례 넘기기", style=discord.ButtonStyle.secondary, emoji="⏭️")
     async def pass_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -1159,7 +1250,7 @@ class CombatView(discord.ui.View):
             if session.turn_index >= len(session.participants):
                 session.turn_index = 0
                 session.round_number += 1
-            await interaction.message.edit(content=render_combat_session(session), view=self)
+            await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     @discord.ui.button(label="전투 종료", style=discord.ButtonStyle.danger, emoji="🏁")
     async def finish_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:

@@ -1055,11 +1055,11 @@ combat_sessions: dict[int, CombatSession] = {}
 
 
 def render_combat_session(session: CombatSession, prompt: str | None = None) -> str:
-    roster = "\n".join(
-        f"{index}. {member.character_name} ({member.dexterity})" if session.phase == "combat"
-        else f"{index}. {member.character_name}"
-        for index, member in enumerate(session.participants, start=1)
-    ) or "참가자 없음"
+    if session.phase == "combat":
+        roster = " > ".join(f"{member.character_name}(민첩 {member.dexterity})" for member in session.participants)
+    else:
+        roster = "\n".join(f"{index}. {member.character_name}" for index, member in enumerate(session.participants, start=1))
+    roster = roster or "참가자 없음"
     if session.phase == "lobby":
         body = f"모의전투 모집 중\n참가자 {len(session.participants)}/8\n{roster}\n\n/모의전투에서 참여를 선택해 등록"
         return f"```text\n{body}\n```"

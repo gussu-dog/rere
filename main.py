@@ -1124,13 +1124,16 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
 
 
 def render_combat_winner(session: CombatSession) -> str:
+    if len(session.participants) > 1 and len({member.hp for member in session.participants}) == 1:
+        names = ", ".join(member.character_name for member in session.participants)
+        return f"```text\n전투 종료\n{names} 무승부 · HP {session.participants[0].hp}\n```"
     survivors = [member for member in session.participants if member.hp > 0]
     if not survivors:
         return "```text\n전투 종료\n승자 없음 · 모든 캐릭터 전투불능\n```"
     highest_hp = max(member.hp for member in survivors)
     winners = [member for member in survivors if member.hp == highest_hp]
     names = ", ".join(member.character_name for member in winners)
-    result = "무승부" if len(winners) > 1 else "승리"
+    result = "공동 승리" if len(winners) > 1 else "승리"
     hp = f"HP {highest_hp}/{winners[0].max_hp}"
     return f"```text\n전투 종료\n{names} {result} · {hp}\n```"
 

@@ -1327,8 +1327,18 @@ class CombatView(discord.ui.View):
 
                 if weapon.malfunction is not None and roll >= weapon.malfunction:
                     weapon.broken = True
-                    self_damage, damage_detail = roll_damage_formula(weapon.damage)
-                    line += f" · 고장! 본인 피해 `{damage_detail}` = **{self_damage}** (무기 피해식만 적용)"
+                    luck_value = await registry.get_skill_value(current.character_value, "행운")
+                    luck_roll = random.randint(1, 100)
+                    luck_succeeded = luck_value is not None and luck_roll <= luck_value
+                    if luck_succeeded:
+                        line += f" · 고장! 행운 판정 `1d100 [{luck_roll}]` / 행운 {luck_value} **성공** — 무기만 고장 났어요."
+                    else:
+                        luck_display = str(luck_value) if luck_value is not None else "확인 불가"
+                        self_damage, damage_detail = roll_damage_formula(weapon.damage)
+                        line += (
+                            f" · 고장! 행운 판정 `1d100 [{luck_roll}]` / 행운 {luck_display} **실패**"
+                            f" — 본인 피해 `{damage_detail}` = **{self_damage}** (무기 피해식만 적용)"
+                        )
                     shot_logs.append(line)
                     break
                 shot_logs.append(line)

@@ -183,6 +183,7 @@ class CombatWeapon:
     name: str
     skill_reference: str
     damage: str
+    impaling: bool = False
 
 
 @dataclass
@@ -592,7 +593,10 @@ class SheetRegistry:
             name = explicit_name or fallback_name
             if not name or not skill_reference or name.casefold() in {"무기", "장비"}:
                 continue
-            weapons.append(CombatWeapon(name, skill_reference, damage or "미기재"))
+            if damage.strip().casefold() == "충격":
+                continue
+            impaling = re.search(r"\(\s*치\s*\)", damage, re.IGNORECASE) is not None
+            weapons.append(CombatWeapon(name, skill_reference, damage or "미기재", impaling))
         return weapons
 
 

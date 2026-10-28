@@ -1056,30 +1056,29 @@ combat_sessions: dict[int, CombatSession] = {}
 
 def render_combat_session(session: CombatSession) -> str:
     roster = "\n".join(
-        f"• {member.character_name} — {member.player_name}"
-        + (f" (민첩 {member.dexterity})" if session.phase == "combat" else "")
-        for member in session.participants
-    ) or "아직 참가자가 없어요. `/모의전투`에서 참여를 선택해 캐릭터를 등록해 주세요!"
+        f"{index}. {member.character_name} ({member.dexterity})" if session.phase == "combat"
+        else f"{index}. {member.character_name}"
+        for index, member in enumerate(session.participants, start=1)
+    ) or "참가자 없음"
     if session.phase == "lobby":
-        return (
-            "**모의전투 참가자를 모집할게요!**\n"
-            "참가할 캐릭터는 `/모의전투`에서 참여를 선택해 등록해 주세요. 한 채널에서는 모집을 하나만 열 수 있어요.\n\n"
-            f"**참가자 ({len(session.participants)}/8)**\n{roster}"
-        )
+        body = f"모의전투 모집 중\n참가자 {len(session.participants)}/8\n{roster}\n\n/모의전투에서 참여를 선택해 등록"
+        return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
-    logs = "\n".join(session.recent_logs) or "아직 굴림 기록이 없어요."
-    initiative = "\n".join(session.initiative_logs) or "동률 판정은 없었어요."
-    return (
-        f"**전투 시뮬레이션을 시작할게요!**\n"
-        f"**{session.round_number}라운드 · 현재 차례:** {current.character_name} ({current.player_name})\n"
-        f"**현재 거리:** {session.distance}\n"
-        "\n"
-        f"**참가자 · 민첩 순**\n{roster}\n\n"
-        f"**민첩 동률 판정**\n{initiative}\n\n"
-        f"**최근 굴림 (최대 4회)**\n{logs}\n\n"
-        "무기를 선택하거나 거리를 조절할 수 있어요. 사격·투척은 근거리에서 보너스, 먼 거리에서 패널티를 받아요."
-    )
+    logs = "\n".join("- " + entry.replace("\n", "\n  ") for entry in session.recent_logs) or "- 기록 없음"
+    sections = [
+        f"모의전투 | {session.round_number}라운드\n"
+        f"거리: {session.distance}\n"
+        f"{current.character_name}의 턴이에요!\n\n"
+        f"행동 순서\n{roster}"
+    ]
+    if session.initiative_logs:
+        sections.append("선공 동률 판정\n" + "\n".join(session.initiative_logs[-2:]))
+    sections.append(f"최근 기록\n{logs}")
+    body = "\n\n".join(sections)
+    if len(body) > 1850:
+        body = body[:1847] + "..."
+    return f"```text\n{body}\n```"
 
 
 def coc_combat_check_result(roll: int, skill_value: int) -> str:

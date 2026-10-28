@@ -1783,7 +1783,7 @@ class CombatView(CombatActionView):
         await session.message.edit(content=render_combat_session(session), view=CombatView(session))
 
 
-    @discord.ui.button(label="차례 넘기기", style=discord.ButtonStyle.secondary, emoji="⏭️")
+    @discord.ui.button(label="차례 넘기기", style=discord.ButtonStyle.secondary, row=4)
     async def pass_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         session = self.session
         async with session.lock:

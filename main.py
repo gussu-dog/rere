@@ -1894,7 +1894,9 @@ class CombatView(CombatActionView):
                 self.add_item(CombatStatusEscapeSelect(session))
             return
         available_weapons = [weapon for weapon in current.weapons if combat_targets(session, weapon)]
-        if available_weapons:
+        if maintaining_combat_shock(session, current):
+            self.add_item(discord.ui.Button(label="충격 유지 중 · 다른 공격 불가", style=discord.ButtonStyle.secondary, disabled=True))
+        elif available_weapons:
             self.add_item(CombatWeaponSelect(session))
         elif any(is_melee_weapon(weapon) for weapon in current.weapons):
             self.add_item(discord.ui.Button(label="근접전은 근거리에서 가능해요", style=discord.ButtonStyle.secondary, disabled=True))
@@ -2094,6 +2096,9 @@ class CombatView(CombatActionView):
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
+            if maintaining_combat_shock(session, current):
+                await interaction.response.send_message("충격을 유지하는 동안에는 다른 공격을 할 수 없어요.", ephemeral=True)
+                return
             if not 0 <= weapon_index < len(current.weapons):
                 await interaction.response.send_message("무기 선택이 만료됐어요. 화면을 새로 확인해 주세요.", ephemeral=True)
                 return
@@ -2130,6 +2135,9 @@ class CombatView(CombatActionView):
         current = session.participants[session.turn_index]
         if combat_is_shocked(session, current) or pending_combat_status_check(session, current):
             await interaction.followup.send("상태 탈출·해제 판정을 먼저 진행해 주세요.", ephemeral=True)
+            return
+        if maintaining_combat_shock(session, current):
+            await interaction.followup.send("충격을 유지하는 동안에는 다른 공격을 할 수 없어요.", ephemeral=True)
             return
         weapon = current.weapons[weapon_index]
         skill_name = normalize_weapon_skill_reference(weapon.skill_reference)
@@ -2294,7 +2302,8 @@ class CombatView(CombatActionView):
                 if attack.hits else
                 f"공격이 빗나갔어요. {with_particle(target.character_name, '는', '은')} 반격하거나 그대로 넘길 수 있어요!"
             )
-            response_choices = ("반격 또는 회피" if attack.hits else "반격 또는 그대로 넘기기") if is_melee_weapon(weapon) and combat_is_active(current) else "회피"
+            can_counter = is_melee_weapon(weapon) and combat_is_active(current) and not maintaining_combat_shock(session, target)
+            response_choices = ("반격 또는 회피" if attack.hits else "반격 또는 그대로 넘기기") if can_counter else "회피" if attack.hits else "그대로 넘기기"
             await session.message.edit(
                 content=render_combat_session(session, f"{target.character_name}: {response_choices} 선택"),
                 view=CombatDefenseView(session),
@@ -2492,7 +2501,8 @@ class CombatDefenseView(CombatActionView):
         if attack is None:
             return
         weapon = session.participants[attack.attacker_index].weapons[attack.weapon_index]
-        if is_melee_weapon(weapon) and combat_is_active(session.participants[attack.attacker_index]):
+        if (is_melee_weapon(weapon) and combat_is_active(session.participants[attack.attacker_index])
+                and not maintaining_combat_shock(session, session.participants[attack.target_index])):
             counter = discord.ui.Button(label="반격", style=discord.ButtonStyle.primary)
             counter.callback = self.counter
             self.add_item(counter)
@@ -2523,6 +2533,9 @@ class CombatDefenseView(CombatActionView):
                 return
             if interaction.user.id != defender.user_id:
                 await interaction.response.send_message(f"이번 방어는 **{defender.character_name}** 차례예요.", ephemeral=True)
+                return
+            if action == "반격" and maintaining_combat_shock(session, defender):
+                await interaction.response.send_message("충격을 유지하는 동안에는 반격할 수 없어요. 회피를 선택해 주세요.", ephemeral=True)
                 return
             await interaction.response.defer()
 

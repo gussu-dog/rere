@@ -1557,8 +1557,8 @@ class CombatView(CombatActionView):
             outcome = "성공" if succeeded else "실패"
             movement_result = "추가 행동 가능" if succeeded else "턴 종료"
             log = (
-                f"【이동 완료 · {movement_result}】 {current.character_name} ↔ {target.character_name} · {distance}\n"
-                f"민첩 {outcome} · 주사위 [{roll}] / 기준 {current.dexterity}"
+                f"민첩 주사위 [{roll}] / 기준 {current.dexterity}\n"
+                f"【민첩 {outcome} · {movement_result}】 {current.character_name} ↔ {target.character_name} · {distance}"
             )
             session.recent_logs.append(log)
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -1697,8 +1697,8 @@ class CombatView(CombatActionView):
             ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
             shot_text = f" · {shot_number}발째" if is_projectile_weapon(weapon) else ""
             line = (
-                f"【{result}】 {current.character_name} → {target.character_name} · {weapon.name}{shot_text}\n"
-                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{ammo_text}"
+                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{ammo_text}\n"
+                f"【{result}】 {current.character_name} → {target.character_name} · {weapon.name}{shot_text}"
             )
             session.recent_logs.append(line)
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -1714,8 +1714,8 @@ class CombatView(CombatActionView):
                 luck_succeeded = luck_value is not None and luck_roll <= luck_value
                 if luck_succeeded:
                     malfunction_log = (
-                        f"【무기 고장 · 행운 성공】 {weapon.name}만 고장났어요!\n"
-                        f"행운 주사위 [{luck_roll}] / 기준 {luck_value}"
+                        f"행운 주사위 [{luck_roll}] / 기준 {luck_value}\n"
+                        f"【무기 고장 · 행운 성공】 {weapon.name}만 고장났어요!"
                     )
                 else:
                     luck_display = str(luck_value) if luck_value is not None else "확인 불가"
@@ -1723,8 +1723,8 @@ class CombatView(CombatActionView):
                     previous_hp = current.hp
                     current.hp = max(0, current.hp - self_damage)
                     malfunction_log = (
-                        f"【무기 고장 · 본인에게 {self_damage} 데미지!】 {current.character_name} · HP {previous_hp} → {current.hp}/{current.max_hp}\n"
-                        f"행운 실패 [{luck_roll}] / 기준 {luck_display} · 피해 {damage_detail} = {self_damage}"
+                        f"행운 주사위 [{luck_roll}] / 기준 {luck_display} · 피해 {damage_detail} = {self_damage}\n"
+                        f"【무기 고장 · 행운 실패 · 본인에게 {self_damage} 데미지!】 {current.character_name} · HP {previous_hp} → {current.hp}/{current.max_hp}"
                     )
                 session.recent_logs.append(malfunction_log)
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -1778,8 +1778,8 @@ class CombatView(CombatActionView):
             target.hp = max(0, target.hp - damage)
             state = " · 【전투불능】" if target.hp == 0 else ""
             session.recent_logs.append(
-                f"【{result} · {damage} 데미지!】 {target.character_name} · HP {previous_hp} → {target.hp}/{target.max_hp}{state}\n"
-                f"피해 주사위 {detail} = {damage}"
+                f"피해 주사위 {detail} = {damage}\n"
+                f"【{result} · {damage} 데미지!】 {target.character_name} · HP {previous_hp} → {target.hp}/{target.max_hp}{state}"
             )
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await session.message.edit(content=render_combat_session(session), view=None)
@@ -1979,8 +1979,8 @@ class CombatDefenseView(CombatActionView):
             rank = ranks[result]
             attack_ranks = [ranks[hit_result] for _hit_roll, hit_result, _shot in attack.hits]
             session.recent_logs.append(
-                f"【{result}】 {defender.character_name}의 {action} 판정\n"
-                f"주사위 1d100 [{roll}] / 기준 {defense_skill}"
+                f"주사위 1d100 [{roll}] / 기준 {defense_skill}\n"
+                f"【{result}】 {defender.character_name}의 {action} 판정"
             )
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await session.message.edit(content=render_combat_session(session), view=None)
@@ -2004,8 +2004,8 @@ class CombatDefenseView(CombatActionView):
                 attacker.hp = max(0, attacker.hp - damage)
                 state = " · 【전투불능】" if attacker.hp == 0 else ""
                 session.recent_logs.append(
-                    f"【반격 성공 · {damage} 데미지!】 {attacker.character_name} · HP {previous_hp} → {attacker.hp}/{attacker.max_hp}{state}\n"
-                    f"비무장 피해 {detail} = {damage}"
+                    f"비무장 피해 {detail} = {damage}\n"
+                    f"【반격 성공 · {damage} 데미지!】 {attacker.character_name} · HP {previous_hp} → {attacker.hp}/{attacker.max_hp}{state}"
                 )
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
                 session.briefing = f"{defender.character_name}의 반격이 성공했어요. 피해를 적용하고 있어요."

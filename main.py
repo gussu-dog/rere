@@ -1052,6 +1052,7 @@ class CombatSession:
 
 
 combat_sessions: dict[int, CombatSession] = {}
+COMBAT_RECENT_LOG_LIMIT = 12
 
 
 def render_combat_session(session: CombatSession, prompt: str | None = None) -> str:
@@ -1326,7 +1327,7 @@ class CombatView(discord.ui.View):
             outcome = "성공" if succeeded else "실패"
             log = f"{current.character_name} — 거리 {session.distance} | 민첩 [{roll}] / {current.dexterity}: {outcome}"
             session.recent_logs.append(log)
-            session.recent_logs = session.recent_logs[-4:]
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await interaction.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
             if not succeeded:
@@ -1398,7 +1399,7 @@ class CombatView(discord.ui.View):
                 ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
                 line = f"{current.character_name} — {weapon.name} {shot_number}발째{mode_text}: {die_text} → {result}{ammo_text}"
                 session.recent_logs.append(line)
-                session.recent_logs = session.recent_logs[-4:]
+                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
                 await session.message.edit(content=render_combat_session(session), view=None)
                 await asyncio.sleep(0.7)
 
@@ -1417,7 +1418,7 @@ class CombatView(discord.ui.View):
                             f"본인 피해 {damage_detail} = {self_damage}"
                         )
                     session.recent_logs.append(malfunction_log)
-                    session.recent_logs = session.recent_logs[-4:]
+                    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
                     await session.message.edit(content=render_combat_session(session), view=None)
                     await asyncio.sleep(0.7)
                     break
@@ -1441,7 +1442,7 @@ class CombatView(discord.ui.View):
                 return
             await interaction.response.defer()
             session.recent_logs.append(f"{current.character_name} — 차례 넘김")
-            session.recent_logs = session.recent_logs[-4:]
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             advance_combat_turn(session)
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 

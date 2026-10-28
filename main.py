@@ -1130,7 +1130,7 @@ def render_combat_winner(session: CombatSession) -> str:
     highest_hp = max(member.hp for member in survivors)
     winners = [member for member in survivors if member.hp == highest_hp]
     names = ", ".join(member.character_name for member in winners)
-    result = "공동 승리" if len(winners) > 1 else "승리"
+    result = "무승부" if len(winners) > 1 else "승리"
     hp = f"HP {highest_hp}/{winners[0].max_hp}"
     return f"```text\n전투 종료\n{names} {result} · {hp}\n```"
 

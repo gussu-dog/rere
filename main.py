@@ -1131,6 +1131,7 @@ class CombatSession:
     briefing: str = ""
     last_attack: str = ""
     last_attack_events: list[str] = field(default_factory=list)
+    elimination_order: list[int] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -1245,6 +1246,32 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
     return f"```text\n{body}\n```"
 
 
+def record_combat_elimination(session: CombatSession, member: CombatParticipant) -> None:
+    if combat_is_active(member):
+        return
+    index = next(index for index, item in enumerate(session.participants) if item is member)
+    if index not in session.elimination_order:
+        session.elimination_order.append(index)
+
+
+def render_combat_ranking(session: CombatSession) -> str:
+    active = sorted((member for member in session.participants if combat_is_active(member)), key=lambda member: member.hp, reverse=True)
+    eliminated = [session.participants[index] for index in reversed(session.elimination_order)]
+    eliminated += [member for member in session.participants if not combat_is_active(member)
+                   and not any(member is item for item in eliminated)]
+    all_draw = len(session.participants) > 1 and not active and len({member.hp for member in session.participants}) == 1
+    lines = []
+    for member in active:
+        rank = next(index + 1 for index, item in enumerate(active) if item.hp == member.hp)
+        tied = sum(item.hp == member.hp for item in active) > 1
+        lines.append(f"{'공동 ' if tied else ''}{rank}위 {member.character_name} · HP {member.hp}")
+    for position, member in enumerate(eliminated, start=len(active) + 1):
+        rank = "공동 1위" if all_draw else f"{position}위"
+        state = "기절 탈락" if member.unconscious else "HP 0 · 탈락"
+        lines.append(f"{rank} {member.character_name} · {state}")
+    return "최종 순위\n" + "\n".join(lines)
+
+
 def render_combat_winner(session: CombatSession) -> str:
     survivors = [member for member in session.participants if combat_is_active(member)]
     if (len(session.participants) > 1 and len({member.hp for member in session.participants}) == 1
@@ -1260,19 +1287,21 @@ def render_combat_winner(session: CombatSession) -> str:
             names = ", ".join(member.character_name for member in winners)
             result = "공동 승리" if len(winners) > 1 else "승리"
             outcome = f"{names} {result} · HP {highest_hp}/{winners[0].max_hp}"
+    ranking = render_combat_ranking(session)
+    summary_budget = max(0, 1850 - len(outcome) - len(ranking))
     if session.last_attack:
         events = session.last_attack_events[-4:]
         while True:
             details = "\n".join(events) or "피해 적용 전에 전투를 종료했어요."
             summary = f"마지막 공격\n{session.last_attack}\n{details}"
-            if len(summary) + len(outcome) <= 1850 or len(events) <= 1:
+            if len(summary) <= summary_budget or len(events) <= 1:
                 break
             events.pop(0)
-        if len(summary) + len(outcome) > 1850:
-            summary = summary[:1847 - len(outcome)] + "..."
+        if len(summary) > summary_budget:
+            summary = summary[:max(0, summary_budget - 3)] + "..."
     else:
         summary = "공격 없이 전투를 종료했어요."
-    return f"```text\n전투 종료\n\n{summary}\n\n{outcome}\n```"
+    return f"```text\n전투 종료\n\n{summary}\n\n{outcome}\n\n{ranking}\n```"
 
 
 async def finish_combat_if_decided(session: CombatSession) -> bool:
@@ -1532,6 +1561,7 @@ def roll_weapon_damage(weapon: CombatWeapon, strength: int, size: int, critical:
 
 
 async def check_combat_major_wound(session: CombatSession, member: CombatParticipant, damage: int) -> None:
+    record_combat_elimination(session, member)
     if damage <= 0 or member.max_hp <= 0 or damage * 2 < member.max_hp:
         return
     roll, rolls, modifier = roll_combat_d100(member, session=session)
@@ -1542,6 +1572,7 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
     if not succeeded:
         member.unconscious = True
         member.cover_active = False
+        record_combat_elimination(session, member)
     status = "중상 · 이후 모든 판정에 패널티 +1" if succeeded else "기절 · 전투 탈락"
     if succeeded and member.hp <= 0:
         status = "중상 · HP 0으로 전투 탈락"

@@ -965,6 +965,9 @@ async def send_flat_response(interaction: discord.Interaction, content: str) -> 
 
 
 async def character_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    mode = getattr(interaction.namespace, "mode", None) or getattr(interaction.namespace, "구분", None)
+    if getattr(mode, "value", mode) == "모집":
+        return []
     try:
         choices = await registry.get_character_choices_for_user(interaction.user.id)
         matches = [(value, name) for value, name in choices if not current or current.casefold() in name.casefold()]
@@ -1049,7 +1052,6 @@ class CombatSession:
 
 
 combat_sessions: dict[int, CombatSession] = {}
-combat_group = app_commands.Group(name="모의전투", description="모의전투 참가자를 모집하고 진행해요!")
 
 
 def render_combat_session(session: CombatSession) -> str:
@@ -1057,11 +1059,11 @@ def render_combat_session(session: CombatSession) -> str:
         f"• {member.character_name} — {member.player_name}"
         + (f" (민첩 {member.dexterity})" if session.phase == "combat" else "")
         for member in session.participants
-    ) or "아직 참가자가 없어요. `/모의전투 참여`로 캐릭터를 등록해 주세요!"
+    ) or "아직 참가자가 없어요. `/모의전투`에서 참여를 선택해 캐릭터를 등록해 주세요!"
     if session.phase == "lobby":
         return (
             "**모의전투 참가자를 모집할게요!**\n"
-            "참가할 캐릭터는 `/모의전투 참여`로 등록해 주세요. 한 채널에서는 모집을 하나만 열 수 있어요.\n\n"
+            "참가할 캐릭터는 `/모의전투`에서 참여를 선택해 등록해 주세요. 한 채널에서는 모집을 하나만 열 수 있어요.\n\n"
             f"**참가자 ({len(session.participants)}/8)**\n{roster}"
         )
 
@@ -1212,7 +1214,7 @@ class CombatLobbyView(discord.ui.View):
                     await interaction.followup.send("이 모집은 이미 종료됐어요.", ephemeral=True)
                     return
                 if not session.participants:
-                    await interaction.followup.send("먼저 `/모의전투 참여`로 캐릭터를 한 명 이상 참가시켜 주세요!", ephemeral=True)
+                    await interaction.followup.send("먼저 `/모의전투`에서 참여를 선택해 캐릭터를 등록해 주세요!", ephemeral=True)
                     return
 
                 async def load_combat_data(member: CombatParticipant) -> tuple[int | None, list[CombatWeapon]]:
@@ -1485,8 +1487,6 @@ class CombatShotCountView(discord.ui.View):
         self.add_item(CombatShotCountSelect(session, weapon_index))
 
 
-@combat_group.command(name="모집", description="이 채널에서 모의전투 참가자를 모집해요!")
-@app_commands.guild_only()
 async def start_combat(interaction: discord.Interaction) -> None:
     channel_id = interaction.channel_id
     if channel_id in combat_sessions:
@@ -1503,14 +1503,10 @@ async def start_combat(interaction: discord.Interaction) -> None:
     session.message = await interaction.original_response()
 
 
-@combat_group.command(name="참여", description="등록한 캐릭터를 이 채널의 모의전투에 참가시켜요!")
-@app_commands.guild_only()
-@app_commands.rename(character="캐릭터")
-@app_commands.autocomplete(character=character_autocomplete)
 async def join_combat(interaction: discord.Interaction, character: str) -> None:
     session = combat_sessions.get(interaction.channel_id)
     if session is None or session.phase != "lobby":
-        await send_response(interaction, "이 채널에 모집 중인 모의전투가 없어요. 먼저 `/모의전투 모집`을 실행해 주세요!", ephemeral=True)
+        await send_response(interaction, "이 채널에 모집 중인 모의전투가 없어요. 먼저 `/모의전투`에서 모집을 선택해 주세요!", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     owned = await registry.get_character_choices_for_user(interaction.user.id)
@@ -1539,7 +1535,30 @@ async def join_combat(interaction: discord.Interaction, character: str) -> None:
     await interaction.followup.send(f"**{display_name}** 캐릭터가 모의전투에 참가했어요!", ephemeral=True)
 
 
-bot.tree.add_command(combat_group)
+@bot.tree.command(name="모의전투", description="모의전투 모집 또는 캐릭터 참여를 진행해요!")
+@app_commands.guild_only()
+@app_commands.rename(mode="구분", character="캐릭터")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="모집", value="모집"),
+    app_commands.Choice(name="참여", value="참여"),
+])
+@app_commands.autocomplete(character=character_autocomplete)
+async def combat_command(
+    interaction: discord.Interaction,
+    mode: app_commands.Choice[str],
+    character: str | None = None,
+) -> None:
+    if mode.value == "모집":
+        if character:
+            await send_response(interaction, "모집을 선택할 때는 캐릭터를 입력하지 않아도 돼요.", ephemeral=True)
+            return
+        await start_combat(interaction)
+        return
+
+    if not character:
+        await send_response(interaction, "참여할 캐릭터를 선택해 주세요.", ephemeral=True)
+        return
+    await join_combat(interaction, character)
 
 
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")

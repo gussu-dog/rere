@@ -591,7 +591,11 @@ class SheetRegistry:
         if skill_index is None or damage_index is None or (name_index is None and fallback_name_index is None):
             return []
 
-        db_index = next((index for index, value in enumerate(header) if value == "db"), None)
+        db_headers = {"db", "데미지보너스", "대미지보너스", "피해보너스", "damagebonus"}
+        db_index = next((
+            index for index, value in enumerate(header)
+            if re.sub(r"[\s_-]+", "", value) in db_headers
+        ), None)
         attacks_index = next((index for index, value in enumerate(header) if value in {"횟수", "공격 횟수"}), None)
         ammo_index = next((index for index, value in enumerate(header) if value in {"탄약", "탄환"}), None)
         malfunction_index = next((index for index, value in enumerate(header) if value in {"고장", "고장치"}), None)

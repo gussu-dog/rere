@@ -1097,6 +1097,7 @@ class CombatParticipant:
     movement_choice: str = ""
     major_wound: bool = False
     unconscious: bool = False
+    forfeited: bool = False
     status_effects: list[CombatStatusEffect] = field(default_factory=list)
 
 
@@ -1140,7 +1141,7 @@ COMBAT_RECENT_LOG_LIMIT = 6
 
 
 def combat_is_active(member: CombatParticipant) -> bool:
-    return member.hp > 0 and not member.unconscious
+    return member.hp > 0 and not member.unconscious and not member.forfeited
 
 
 def active_combat_statuses(session: CombatSession, member: CombatParticipant) -> list[CombatStatusEffect]:
@@ -1202,7 +1203,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
             f"{' · 지속' if combat_is_active(member) and any('지속' in effect.spec.kinds for effect in active_combat_statuses(session, member)) else ''}"
-            f"{' · 기절(탈락)' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''})"
+            f"{' · 기권' if member.forfeited else ' · 기절(탈락)' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''})"
             for member in session.participants
         )
     else:
@@ -1267,7 +1268,7 @@ def render_combat_ranking(session: CombatSession) -> str:
         lines.append(f"{'공동 ' if tied else ''}{rank}위 {member.character_name} · HP {member.hp}")
     for position, member in enumerate(eliminated, start=len(active) + 1):
         rank = "공동 1위" if all_draw else f"{position}위"
-        state = "기절 탈락" if member.unconscious else "HP 0 · 탈락"
+        state = "기권" if member.forfeited else "기절 탈락" if member.unconscious else "HP 0 · 탈락"
         lines.append(f"{rank} {member.character_name} · {state}")
     return "최종 순위\n" + "\n".join(lines)
 
@@ -1751,6 +1752,7 @@ class CombatLobbyView(discord.ui.View):
                     member.movement_choice = ""
                     member.major_wound = False
                     member.unconscious = False
+                    member.forfeited = False
                     member.status_effects = []
                 session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
                 session.phase = "combat"
@@ -1786,8 +1788,8 @@ class CombatActionView(discord.ui.View):
             button = discord.ui.Button(label="돌아가기", style=discord.ButtonStyle.secondary, row=4)
             button.callback = self.go_back
             self.add_item(button)
-        button = discord.ui.Button(label="전투 종료", style=discord.ButtonStyle.danger, row=4)
-        button.callback = self.end_combat
+        button = discord.ui.Button(label="기권", style=discord.ButtonStyle.danger, row=4)
+        button.callback = self.request_forfeit
         self.add_item(button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1814,20 +1816,32 @@ class CombatActionView(discord.ui.View):
             session.briefing = f"{session.participants[session.turn_index].character_name}의 턴이에요!"
             await interaction.response.edit_message(content=render_combat_session(session), view=CombatView(session))
 
-    async def end_combat(self, interaction: discord.Interaction) -> None:
+    async def request_forfeit(self, interaction: discord.Interaction) -> None:
         session = self.session
-        if interaction.user.id != session.owner_id:
-            await interaction.response.send_message("모집을 연 사람만 전투를 종료할 수 있어요.", ephemeral=True)
-            return
-        await interaction.response.defer()
         async with session.lock:
-            if session.phase != "combat":
+            if not await self.ensure_current(interaction):
                 return
-            combat_sessions.pop(session.channel_id, None)
-            session.phase = "finished"
-            session.pending_attack = None
-            await session.message.edit(content=render_combat_winner(session), view=None)
-        self.stop()
+            index = session.pending_attack.target_index if session.pending_attack is not None else session.turn_index
+            member = session.participants[index]
+            if interaction.user.id != member.user_id:
+                await interaction.response.send_message(f"지금은 **{member.character_name}** 차례예요. 해당 캐릭터만 기권할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            await forfeit_combat_member(session, index)
+
+
+async def forfeit_combat_member(session: CombatSession, index: int) -> None:
+    member = session.participants[index]
+    member.forfeited = True
+    member.cover_active = False
+    member.status_effects = []
+    record_combat_elimination(session, member)
+    session.recent_logs.append(f"【기권】 {member.character_name} · 전투 탈락")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+    session.last_attack_events.append(f"{member.character_name} 기권! 전투에서 빠졌어요.")
+    if await finish_combat_if_decided(session):
+        return
+    await CombatView(session).complete_attack_turn(f"{member.character_name} 기권!")
 
 
 class CombatWeaponSelect(discord.ui.Select):

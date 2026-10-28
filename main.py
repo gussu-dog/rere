@@ -1728,6 +1728,7 @@ class CombatLobbyView(discord.ui.View):
                 session.turn_serial = 1
                 session.briefing = f"전투 시작! {session.participants[0].character_name}의 턴이에요!"
                 await repost_combat_turn(session)
+                session.initiative_logs.clear()
         except Exception as exc:
             print(f"Combat start failed ({type(exc).__name__}).")
             await interaction.followup.send("캐릭터 시트에서 민첩·근력·건강·크기 값을 읽지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)

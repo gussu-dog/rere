@@ -1087,7 +1087,7 @@ class CombatSession:
 
 
 combat_sessions: dict[int, CombatSession] = {}
-COMBAT_RECENT_LOG_LIMIT = 12
+COMBAT_RECENT_LOG_LIMIT = 10
 
 
 def combat_is_active(member: CombatParticipant) -> bool:

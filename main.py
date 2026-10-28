@@ -957,6 +957,7 @@ class CombatSession:
 
 
 combat_sessions: dict[int, CombatSession] = {}
+combat_group = app_commands.Group(name="모의전투", description="모의전투 참가자를 모집하고 진행해요!")
 
 
 def render_combat_session(session: CombatSession) -> str:
@@ -964,11 +965,11 @@ def render_combat_session(session: CombatSession) -> str:
         f"• {member.character_name} — {member.player_name}"
         + (f" (민첩 {member.dexterity})" if session.phase == "combat" else "")
         for member in session.participants
-    ) or "아직 참가자가 없어요. `/전투참여`로 캐릭터를 등록해 주세요!"
+    ) or "아직 참가자가 없어요. `/모의전투 참여`로 캐릭터를 등록해 주세요!"
     if session.phase == "lobby":
         return (
             "**모의전투 참가자를 모집할게요!**\n"
-            "참가할 캐릭터는 `/전투참여`로 등록해 주세요. 한 채널에서는 모집을 하나만 열 수 있어요.\n\n"
+            "참가할 캐릭터는 `/모의전투 참여`로 등록해 주세요. 한 채널에서는 모집을 하나만 열 수 있어요.\n\n"
             f"**참가자 ({len(session.participants)}/8)**\n{roster}"
         )
 
@@ -1016,7 +1017,7 @@ class CombatLobbyView(discord.ui.View):
                     await interaction.followup.send("이 모집은 이미 종료됐어요.", ephemeral=True)
                     return
                 if not session.participants:
-                    await interaction.followup.send("먼저 `/전투참여`로 캐릭터를 한 명 이상 참가시켜 주세요!", ephemeral=True)
+                    await interaction.followup.send("먼저 `/모의전투 참여`로 캐릭터를 한 명 이상 참가시켜 주세요!", ephemeral=True)
                     return
                 for member in session.participants:
                     member.dexterity = await registry.get_skill_value(member.character_value, "민첩") or 0
@@ -1115,7 +1116,7 @@ class CombatView(discord.ui.View):
         self.stop()
 
 
-@bot.tree.command(name="모의전투", description="이 채널에서 모의전투 참가자를 모집해요!")
+@combat_group.command(name="모집", description="이 채널에서 모의전투 참가자를 모집해요!")
 @app_commands.guild_only()
 async def start_combat(interaction: discord.Interaction) -> None:
     channel_id = interaction.channel_id
@@ -1133,14 +1134,14 @@ async def start_combat(interaction: discord.Interaction) -> None:
     session.message = await interaction.original_response()
 
 
-@bot.tree.command(name="전투참여", description="등록한 캐릭터를 이 채널의 모의전투에 참가시켜요!")
+@combat_group.command(name="참여", description="등록한 캐릭터를 이 채널의 모의전투에 참가시켜요!")
 @app_commands.guild_only()
 @app_commands.rename(character="캐릭터")
 @app_commands.autocomplete(character=character_autocomplete)
 async def join_combat(interaction: discord.Interaction, character: str) -> None:
     session = combat_sessions.get(interaction.channel_id)
     if session is None or session.phase != "lobby":
-        await send_response(interaction, "이 채널에 모집 중인 모의전투가 없어요. 먼저 `/모의전투`를 실행해 주세요!", ephemeral=True)
+        await send_response(interaction, "이 채널에 모집 중인 모의전투가 없어요. 먼저 `/모의전투 모집`을 실행해 주세요!", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     owned = await registry.get_character_choices_for_user(interaction.user.id)
@@ -1167,6 +1168,9 @@ async def join_combat(interaction: discord.Interaction, character: str) -> None:
         if session.message is not None:
             await session.message.edit(content=render_combat_session(session), view=CombatLobbyView(session))
     await interaction.followup.send(f"**{display_name}** 캐릭터가 모의전투에 참가했어요!", ephemeral=True)
+
+
+bot.tree.add_command(combat_group)
 
 
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")

@@ -1042,6 +1042,7 @@ class CombatParticipant:
     is_pulp: bool = False
     weapons: list[CombatWeapon] = field(default_factory=list)
     weapon_states: dict[tuple[str, str, int], tuple[int | None, bool]] = field(default_factory=dict)
+    defended_round: int = 0
 
 
 @dataclass
@@ -1461,6 +1462,7 @@ class CombatLobbyView(discord.ui.View):
                     member.max_hp = max(1, (member.constitution + member.size) // 10)
                     member.hp = member.max_hp
                     member.weapons = weapons
+                    member.defended_round = 0
                 session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
                 session.phase = "combat"
                 session.round_number = 1
@@ -1767,18 +1769,24 @@ class CombatView(CombatActionView):
             burst_penalty = shot_number - 1 if is_projectile_weapon(weapon) else 0
             distance = combat_distance(session, attack.attacker_index, attack.target_index)
             distance_modifier = 1 if is_projectile_weapon(weapon) and distance == "근거리" else -1 if is_projectile_weapon(weapon) and distance == "먼 거리" else 0
-            net_modifier = distance_modifier - burst_penalty
+            outnumbered_bonus = 1 if target.defended_round == session.round_number else 0
+            net_modifier = distance_modifier + outnumbered_bonus - burst_penalty
             rolls = [random.randint(1, 100) for _ in range(abs(net_modifier) + 1)]
             roll = min(rolls) if net_modifier > 0 else max(rolls)
             result = coc_combat_check_result(roll, attack.skill_value)
             die_text = f"1d100 [{', '.join(str(value) for value in rolls)}]"
-            mode_text = f" (보너스 +{net_modifier})" if net_modifier > 0 else f" (패널티 +{-net_modifier})" if net_modifier < 0 else ""
+            mode_text = (
+                f" (보너스 +{net_modifier})" if net_modifier > 0 else
+                f" (패널티 +{-net_modifier})" if net_modifier < 0 else
+                " (일반 굴림 · 보정 상쇄)" if outnumbered_bonus else ""
+            )
+            outnumbered_text = " · 수적열세 보너스 +1" if outnumbered_bonus else ""
             if is_projectile_weapon(weapon) and weapon.ammo is not None:
                 weapon.ammo -= 1
             ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
             shot_text = f" · {shot_number}발째" if is_projectile_weapon(weapon) else ""
             line = (
-                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{ammo_text}\n"
+                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{outnumbered_text}{ammo_text}\n"
                 f"【{result}】 {current.character_name} → {target.character_name} · {weapon.name}{shot_text}"
             )
             session.recent_logs.append(line)
@@ -2077,6 +2085,7 @@ class CombatDefenseView(CombatActionView):
             session.briefing = f"{defender.character_name}의 {action} 판정을 처리하고 있어요."
 
             roll = random.randint(1, 100)
+            defender.defended_round = session.round_number
             result = coc_combat_check_result(roll, defense_skill)
             ranks = {"대실패": 0, "실패": 0, "보통 성공": 1, "어려운 성공": 2, "극단적 성공": 3, "대성공": 4}
             rank = ranks[result]

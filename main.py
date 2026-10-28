@@ -1047,6 +1047,8 @@ class CombatParticipant:
     weapons: list[CombatWeapon] = field(default_factory=list)
     weapon_states: dict[tuple[str, str, int], tuple[int | None, bool]] = field(default_factory=dict)
     defended_round: int = 0
+    cover_active: bool = False
+    movement_choice: str = ""
 
 
 @dataclass
@@ -1106,6 +1108,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
     if session.phase == "combat":
         roster = " > ".join(
             f"{member.character_name}(민첩 {member.dexterity} · HP {member.hp}/{member.max_hp}"
+            f"{' · 엄폐 중' if member.cover_active and member.hp > 0 else ''}"
             f"{' · 전투불능' if member.hp <= 0 else ''})"
             for member in session.participants
         )
@@ -1282,6 +1285,8 @@ def advance_combat_turn(session: CombatSession) -> None:
             session.turn_index = 0
             session.round_number += 1
         if session.participants[session.turn_index].hp > 0:
+            session.participants[session.turn_index].cover_active = False
+            session.participants[session.turn_index].movement_choice = ""
             return
 
 
@@ -1496,6 +1501,8 @@ class CombatLobbyView(discord.ui.View):
                     member.hp = member.max_hp
                     member.weapons = weapons
                     member.defended_round = 0
+                    member.cover_active = False
+                    member.movement_choice = ""
                 session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
                 session.phase = "combat"
                 session.round_number = 1
@@ -1611,12 +1618,61 @@ class CombatView(CombatActionView):
             self.add_item(discord.ui.Button(label="근접전은 근거리에서 가능해요", style=discord.ButtonStyle.secondary, disabled=True))
         else:
             self.add_item(discord.ui.Button(label="시트에서 무기를 찾지 못했어요", style=discord.ButtonStyle.secondary, disabled=True))
-        close_button = discord.ui.Button(label="거리 좁히기", style=discord.ButtonStyle.primary, row=2, disabled=not any(combat_distance(session, session.turn_index, i) != "근거리" for i in combat_targets(session)))
+        close_button = discord.ui.Button(label="거리 좁히기", style=discord.ButtonStyle.primary, row=2, disabled=current.movement_choice == "cover" or not any(combat_distance(session, session.turn_index, i) != "근거리" for i in combat_targets(session)))
         close_button.callback = self.close_distance
         self.add_item(close_button)
-        widen_button = discord.ui.Button(label="거리 넓히기", style=discord.ButtonStyle.secondary, row=2, disabled=not any(combat_distance(session, session.turn_index, i) != "먼 거리" for i in combat_targets(session)))
+        widen_button = discord.ui.Button(label="거리 넓히기", style=discord.ButtonStyle.secondary, row=2, disabled=current.movement_choice == "cover" or not any(combat_distance(session, session.turn_index, i) != "먼 거리" for i in combat_targets(session)))
         widen_button.callback = self.widen_distance
         self.add_item(widen_button)
+        cover_button = discord.ui.Button(
+            label="엄폐", style=discord.ButtonStyle.secondary, row=2,
+            disabled=bool(current.movement_choice) or not any(
+                combat_distance(session, session.turn_index, i) != "근거리" for i in combat_targets(session)
+            ),
+        )
+        cover_button.callback = self.take_cover
+        self.add_item(cover_button)
+
+    async def take_cover(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            current = session.participants[session.turn_index]
+            if interaction.user.id != current.user_id:
+                await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
+                return
+            if current.movement_choice:
+                await interaction.response.send_message("이번 턴에는 이미 이동하거나 엄폐를 시도했어요.", ephemeral=True)
+                return
+            if not any(combat_distance(session, session.turn_index, i) != "근거리" for i in combat_targets(session)):
+                await interaction.response.send_message("엄폐는 상대와 보통거리 이상일 때 사용할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            try:
+                stealth = await registry.get_skill_value(current.character_value, "은밀행동")
+                if stealth is None:
+                    raise SheetError("은밀행동 값을 읽지 못했어요.")
+            except Exception as exc:
+                print(f"Combat cover read failed ({type(exc).__name__}).")
+                await interaction.followup.send("은밀행동 값을 읽지 못했어요. 엄폐 버튼을 눌러 다시 시도해 주세요.", ephemeral=True)
+                return
+            roll = random.randint(1, 100)
+            result = coc_combat_check_result(roll, stealth)
+            current.cover_active = result not in {"실패", "대실패"}
+            current.movement_choice = "cover"
+            outcome = "성공" if current.cover_active else "실패"
+            effect = "다음 자기 턴까지 보통·먼 거리에서 받는 사격에 패널티 +1" if current.cover_active else "추가 불이익 없음"
+            session.recent_logs.append(
+                f"은밀행동 주사위 1d100 [{roll}] / 기준 {stealth}\n"
+                f"【엄폐 {outcome}】 {current.character_name} · {effect}"
+            )
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            session.briefing = (
+                f"{current.character_name}의 엄폐 {outcome}! 이번 턴은 이동 없이 공격할 수 있어요. "
+                f"아직 {current.character_name}의 턴이에요!"
+            )
+            await session.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     async def close_distance(self, interaction: discord.Interaction) -> None:
         await self.move_distance(interaction, -1)
@@ -1632,6 +1688,9 @@ class CombatView(CombatActionView):
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
+                return
+            if current.movement_choice == "cover":
+                await interaction.response.send_message("엄폐를 시도한 턴에는 거리를 이동할 수 없어요.", ephemeral=True)
                 return
             distance_order = ["근거리", "보통거리", "먼 거리"]
             targets = [i for i in combat_targets(session)
@@ -1657,6 +1716,7 @@ class CombatView(CombatActionView):
                 return
             await interaction.response.defer()
             roll = random.randint(1, 100)
+            current.movement_choice = "move"
             succeeded = roll <= current.dexterity
             distance = distance_order[new_index]
             session.distances[tuple(sorted((session.turn_index, target_index)))] = distance
@@ -1813,7 +1873,8 @@ class CombatView(CombatActionView):
             distance = combat_distance(session, attack.attacker_index, attack.target_index)
             distance_modifier = 1 if is_projectile_weapon(weapon) and distance == "근거리" else -1 if is_projectile_weapon(weapon) and distance == "먼 거리" else 0
             outnumbered_bonus = 1 if target.defended_round == session.round_number else 0
-            net_modifier = distance_modifier + outnumbered_bonus - burst_penalty
+            cover_penalty = 1 if target.cover_active and is_firearm_weapon(weapon) and distance != "근거리" else 0
+            net_modifier = distance_modifier + outnumbered_bonus - burst_penalty - cover_penalty
             rolls = [random.randint(1, 100) for _ in range(abs(net_modifier) + 1)]
             roll = min(rolls) if net_modifier > 0 else max(rolls)
             result = coc_combat_check_result(roll, attack.skill_value)
@@ -1821,15 +1882,16 @@ class CombatView(CombatActionView):
             mode_text = (
                 f" (보너스 +{net_modifier})" if net_modifier > 0 else
                 f" (패널티 +{-net_modifier})" if net_modifier < 0 else
-                " (일반 굴림 · 보정 상쇄)" if outnumbered_bonus else ""
+                " (일반 굴림 · 보정 상쇄)" if any((distance_modifier, outnumbered_bonus, burst_penalty, cover_penalty)) else ""
             )
             outnumbered_text = " · 수적열세 보너스 +1" if outnumbered_bonus else ""
+            cover_text = " · 엄폐 패널티 +1" if cover_penalty else ""
             if is_projectile_weapon(weapon) and weapon.ammo is not None:
                 weapon.ammo -= 1
             ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
             shot_text = f" · {shot_number}발째" if is_projectile_weapon(weapon) else ""
             line = (
-                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{outnumbered_text}{ammo_text}\n"
+                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{outnumbered_text}{cover_text}{ammo_text}\n"
                 f"【{result}】 {current.character_name} → {target.character_name} · {weapon.name}{shot_text}"
             )
             session.recent_logs.append(line)

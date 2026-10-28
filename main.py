@@ -1194,7 +1194,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         return value.replace("`", "").replace("**", "")
 
     if session.phase == "combat":
-        roster = " > ".join(
+        roster = "\n".join(
             f"{member.character_name}(민첩 {member.dexterity} · HP {member.hp}/{member.max_hp}"
             f"{' · 엄폐 중' if member.cover_active and combat_is_active(member) else ''}"
             f"{' · 중상' if member.major_wound else ''}"

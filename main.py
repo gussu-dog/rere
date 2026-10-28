@@ -179,6 +179,38 @@ class RegisteredSpreadsheet:
 
 
 @dataclass
+class CombatStatusSpec:
+    kinds: tuple[str, ...]
+    escape_skill: str
+
+
+def parse_combat_statuses(damage: str) -> tuple[str, list[CombatStatusSpec]]:
+    text = damage.replace("（", "(").replace("）", ")")
+    parts: list[str] = []
+    effects: list[CombatStatusSpec] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "(":
+            parts.append(text[index])
+            index += 1
+            continue
+        end, depth = index + 1, 1
+        while end < len(text) and depth:
+            depth += (text[end] == "(") - (text[end] == ")")
+            end += 1
+        group = text[index:end]
+        body = group[1:-1].replace("：", ":") if depth == 0 else ""
+        labels, separator, skill = body.partition(":")
+        kinds = tuple(dict.fromkeys(item.strip() for item in re.split(r"[,，、]", labels) if item.strip()))
+        if separator and skill.strip() and kinds and all(kind in {"충격", "지속"} for kind in kinds):
+            effects.append(CombatStatusSpec(kinds, skill.strip()))
+        else:
+            parts.append(group)
+        index = end
+    return "".join(parts).strip(), effects
+
+
+@dataclass
 class CombatWeapon:
     name: str
     skill_reference: str
@@ -189,6 +221,18 @@ class CombatWeapon:
     ammo: int | None = None
     malfunction: int | None = None
     broken: bool = False
+    effects: list[CombatStatusSpec] = field(default_factory=list)
+
+
+@dataclass
+class CombatStatusEffect:
+    source_index: int
+    weapon: CombatWeapon
+    spec: CombatStatusSpec
+    strength: int
+    size: int
+    last_tick: int = 0
+    escape_pending: bool = False
 
 
 @dataclass
@@ -619,18 +663,20 @@ class SheetRegistry:
             if damage.strip().casefold() == "충격":
                 continue
             impaling = re.search(r"\(\s*치\s*\)", damage, re.IGNORECASE) is not None
+            damage, effects = parse_combat_statuses(damage)
             ammo_text = cell(row, ammo_index)
             ammo = first_number(ammo_text)
             malfunction = first_number(cell(row, malfunction_index))
             weapons.append(CombatWeapon(
                 name=name,
                 skill_reference=skill_reference,
-                damage=damage or "미기재",
+                damage=damage or ("0" if effects else "미기재"),
                 impaling=impaling,
                 damage_bonus=cell(row, db_index),
                 attacks=cell(row, attacks_index),
                 ammo=ammo,
                 malfunction=malfunction,
+                effects=effects,
             ))
         return weapons
 
@@ -1051,6 +1097,7 @@ class CombatParticipant:
     movement_choice: str = ""
     major_wound: bool = False
     unconscious: bool = False
+    status_effects: list[CombatStatusEffect] = field(default_factory=list)
 
 
 @dataclass
@@ -1076,6 +1123,7 @@ class CombatSession:
     phase: str = "lobby"
     round_number: int = 1
     turn_index: int = 0
+    turn_serial: int = 1
     distances: dict[tuple[int, int], str] = field(default_factory=dict)
     initiative_logs: list[str] = field(default_factory=list)
     recent_logs: list[str] = field(default_factory=list)
@@ -1094,16 +1142,38 @@ def combat_is_active(member: CombatParticipant) -> bool:
     return member.hp > 0 and not member.unconscious
 
 
-def roll_combat_d100(member: CombatParticipant, modifier: int = 0) -> tuple[int, list[int], int]:
+def active_combat_statuses(session: CombatSession, member: CombatParticipant) -> list[CombatStatusEffect]:
+    return [effect for effect in member.status_effects
+            if "충격" not in effect.spec.kinds or combat_is_active(session.participants[effect.source_index])]
+
+
+def combat_is_shocked(session: CombatSession, member: CombatParticipant) -> bool:
+    return any("충격" in effect.spec.kinds for effect in active_combat_statuses(session, member))
+
+
+def maintaining_combat_shock(session: CombatSession | None, member: CombatParticipant) -> bool:
+    if session is None:
+        return False
+    return any(
+        combat_is_active(target) and any(
+            "충격" in effect.spec.kinds and session.participants[effect.source_index] is member
+            for effect in active_combat_statuses(session, target)
+        ) for target in session.participants
+    )
+
+
+def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: CombatSession | None = None) -> tuple[int, list[int], int]:
     modifier -= int(member.major_wound)
+    modifier -= int(maintaining_combat_shock(session, member))
     rolls = [random.randint(1, 100) for _ in range(abs(modifier) + 1)]
     return (min(rolls) if modifier > 0 else max(rolls)), rolls, modifier
 
 
-def combat_roll_text(member: CombatParticipant, roll: int, rolls: list[int], modifier: int) -> str:
+def combat_roll_text(member: CombatParticipant, roll: int, rolls: list[int], modifier: int, *, session: CombatSession | None = None) -> str:
     mode = f" · 보너스 +{modifier}" if modifier > 0 else f" · 패널티 +{-modifier}" if modifier < 0 else ""
     wound = " · 중상 패널티 +1" if member.major_wound else ""
-    return f"1d100 [{', '.join(map(str, rolls))}] → 적용 {roll}{mode}{wound}"
+    hold = " · 충격 유지 패널티 +1" if maintaining_combat_shock(session, member) else ""
+    return f"1d100 [{', '.join(map(str, rolls))}] → 적용 {roll}{mode}{wound}{hold}"
 
 
 def combat_distance(session: CombatSession, first: int, second: int) -> str:
@@ -1128,6 +1198,9 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{member.character_name}(민첩 {member.dexterity} · HP {member.hp}/{member.max_hp}"
             f"{' · 엄폐 중' if member.cover_active and combat_is_active(member) else ''}"
             f"{' · 중상' if member.major_wound else ''}"
+            f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
+            f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
+            f"{' · 지속' if combat_is_active(member) and any('지속' in effect.spec.kinds for effect in active_combat_statuses(session, member)) else ''}"
             f"{' · 기절(탈락)' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''})"
             for member in session.participants
         )
@@ -1305,6 +1378,7 @@ def advance_combat_turn(session: CombatSession) -> None:
             session.turn_index = 0
             session.round_number += 1
         if combat_is_active(session.participants[session.turn_index]):
+            session.turn_serial += 1
             session.participants[session.turn_index].cover_active = False
             session.participants[session.turn_index].movement_choice = ""
             return
@@ -1340,6 +1414,8 @@ async def refresh_combat_turn_weapons(session: CombatSession) -> None:
 
 
 async def repost_combat_turn(session: CombatSession) -> None:
+    if await prepare_combat_status_turn(session):
+        return
     previous = session.message
     if previous is None:
         raise RuntimeError("Combat message is missing")
@@ -1370,6 +1446,7 @@ async def repost_combat_turn(session: CombatSession) -> None:
 
 def roll_damage_formula(formula: str) -> tuple[int, str]:
     """Roll only the weapon's listed damage dice, without adding a damage bonus."""
+    formula, _ = parse_combat_statuses(formula)
     cleaned = re.sub(r"\(\s*치\s*\)", "", formula, flags=re.IGNORECASE).strip()
     if not cleaned or cleaned.casefold() in {"미기재", "충격", "-"}:
         return 0, cleaned or "미기재"
@@ -1399,6 +1476,7 @@ def roll_damage_formula(formula: str) -> tuple[int, str]:
 
 
 def maximum_damage_formula(formula: str) -> int:
+    formula, _ = parse_combat_statuses(formula)
     cleaned = re.sub(r"\(\s*치\s*\)", "", formula, flags=re.IGNORECASE).replace(" ", "")
     tokens = re.findall(r"[+-]?(?:\d*[dD]\d+|\d+)", cleaned)
     if not tokens or "".join(tokens).casefold() != cleaned.casefold():
@@ -1456,8 +1534,8 @@ def roll_weapon_damage(weapon: CombatWeapon, strength: int, size: int, critical:
 async def check_combat_major_wound(session: CombatSession, member: CombatParticipant, damage: int) -> None:
     if damage <= 0 or member.max_hp <= 0 or damage * 2 < member.max_hp:
         return
-    roll, rolls, modifier = roll_combat_d100(member)
-    dice_text = combat_roll_text(member, roll, rolls, modifier)
+    roll, rolls, modifier = roll_combat_d100(member, session=session)
+    dice_text = combat_roll_text(member, roll, rolls, modifier, session=session)
     result = coc_combat_check_result(roll, member.constitution)
     succeeded = result not in {"실패", "대실패"}
     member.major_wound = True
@@ -1478,6 +1556,95 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
     session.briefing = f"{member.character_name}의 중상 건강 판정 {'성공' if succeeded else '실패'}! {status}."
     await session.message.edit(content=render_combat_session(session), view=None)
     await asyncio.sleep(0.7)
+
+
+def apply_combat_weapon_statuses(session: CombatSession, attacker: CombatParticipant, target: CombatParticipant, weapon: CombatWeapon) -> None:
+    source_index = next(index for index, member in enumerate(session.participants) if member is attacker)
+    for spec in weapon.effects:
+        if "충격" in spec.kinds and not combat_is_active(attacker):
+            continue
+        target.status_effects = [effect for effect in active_combat_statuses(session, target)
+                                 if not (effect.source_index == source_index and effect.weapon.name == weapon.name
+                                         and set(effect.spec.kinds) == set(spec.kinds) and effect.spec.escape_skill == spec.escape_skill)]
+        target.status_effects.append(CombatStatusEffect(source_index, replace(weapon), spec, attacker.strength, attacker.size))
+        label = "·".join(spec.kinds)
+        session.recent_logs.append(f"【{label} 부여】 {target.character_name} · 해제 판정: {spec.escape_skill}")
+        session.last_attack_events.append(f"{target.character_name}에게 {label} 부여! 해제 판정: {spec.escape_skill}.")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+
+
+def pending_combat_status_check(session: CombatSession, member: CombatParticipant) -> bool:
+    return any(effect.escape_pending and "충격" not in effect.spec.kinds for effect in active_combat_statuses(session, member))
+
+
+async def attempt_combat_status_escape(session: CombatSession, member: CombatParticipant, effect: CombatStatusEffect) -> bool | None:
+    skill = "근접전 | 격투" if effect.spec.escape_skill.strip() == "근접전" else normalize_weapon_skill_reference(effect.spec.escape_skill)
+    try:
+        value = await registry.get_skill_value(member.character_value, skill)
+        if value is None:
+            raise SheetError(f"{skill} 값을 읽지 못했어요.")
+    except Exception as exc:
+        effect.escape_pending = True
+        session.briefing = f"{member.character_name}의 {skill} 값을 읽지 못했어요. 해제 판정을 다시 시도해 주세요."
+        print(f"Combat status escape read failed ({type(exc).__name__}).")
+        return None
+    roll, rolls, modifier = roll_combat_d100(member, session=session)
+    result = coc_combat_check_result(roll, value)
+    succeeded = result not in {"실패", "대실패"}
+    effect.escape_pending = False
+    if succeeded:
+        member.status_effects.remove(effect)
+    label = "·".join(effect.spec.kinds)
+    session.recent_logs.append(
+        f"{skill} 주사위 {combat_roll_text(member, roll, rolls, modifier, session=session)} / 기준 {value}\n"
+        f"【{label} 해제 {'성공' if succeeded else '실패'}】 {member.character_name}"
+    )
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+    return succeeded
+
+
+async def resolve_automatic_combat_status_checks(session: CombatSession, member: CombatParticipant) -> None:
+    for effect in active_combat_statuses(session, member):
+        if effect.escape_pending and "충격" not in effect.spec.kinds:
+            await attempt_combat_status_escape(session, member, effect)
+
+
+async def prepare_combat_status_turn(session: CombatSession) -> bool:
+    for _ in range(len(session.participants)):
+        member = session.participants[session.turn_index]
+        member.status_effects = active_combat_statuses(session, member)
+        for effect in member.status_effects[:]:
+            if "지속" not in effect.spec.kinds or effect.last_tick == session.turn_serial:
+                continue
+            effect.last_tick = session.turn_serial
+            effect.escape_pending = "충격" not in effect.spec.kinds
+            damage, detail = roll_weapon_damage(effect.weapon, effect.strength, effect.size)
+            previous_hp = member.hp
+            member.hp = max(0, member.hp - damage)
+            source = session.participants[effect.source_index]
+            session.last_attack = f"{source.character_name} → {member.character_name} · {effect.weapon.name} 지속 피해"
+            session.last_attack_events = [f"지속 피해 {damage} 데미지! (HP {previous_hp} → {member.hp})"]
+            session.recent_logs.append(
+                f"지속 피해 주사위 {detail} = {damage}\n"
+                f"【지속 · {damage} 데미지!】 {member.character_name} · HP {previous_hp} → {member.hp}"
+            )
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            await session.message.edit(content=render_combat_session(session), view=None)
+            await asyncio.sleep(0.7)
+            await check_combat_major_wound(session, member, damage)
+            if not combat_is_active(member):
+                break
+        if combat_is_active(member):
+            await resolve_automatic_combat_status_checks(session, member)
+            if combat_is_shocked(session, member) and not pending_combat_status_check(session, member):
+                session.briefing = f"{with_particle(member.character_name, '는', '은')} 충격 상태예요. 탈출 판정만 가능하고, 성공·실패 모두 턴이 끝나요."
+            return False
+        if await finish_combat_if_decided(session):
+            return True
+        advance_combat_turn(session)
+        session.briefing = f"지속 피해로 전투에서 탈락했어요. 이제 {session.participants[session.turn_index].character_name}의 턴이에요!"
+        await refresh_combat_turn_weapons(session)
+    return session.phase == "finished"
 
 
 async def apply_combat_fumble_damage(session: CombatSession, member: CombatParticipant, unarmed: CombatWeapon) -> None:
@@ -1553,10 +1720,12 @@ class CombatLobbyView(discord.ui.View):
                     member.movement_choice = ""
                     member.major_wound = False
                     member.unconscious = False
+                    member.status_effects = []
                 session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
                 session.phase = "combat"
                 session.round_number = 1
                 session.turn_index = 0
+                session.turn_serial = 1
                 session.briefing = f"전투 시작! {session.participants[0].character_name}의 턴이에요!"
                 await repost_combat_turn(session)
         except Exception as exc:
@@ -1661,6 +1830,17 @@ class CombatView(CombatActionView):
     def __init__(self, session: CombatSession) -> None:
         super().__init__(session)
         current = session.participants[session.turn_index]
+        if combat_is_shocked(session, current) or pending_combat_status_check(session, current):
+            for item in self.children:
+                if getattr(item, "label", "") == "차례 넘기기":
+                    item.disabled = True
+            if pending_combat_status_check(session, current):
+                retry = discord.ui.Button(label="상태 해제 판정 재시도", style=discord.ButtonStyle.primary)
+                retry.callback = self.retry_status_checks
+                self.add_item(retry)
+            else:
+                self.add_item(CombatStatusEscapeSelect(session))
+            return
         available_weapons = [weapon for weapon in current.weapons if combat_targets(session, weapon)]
         if available_weapons:
             self.add_item(CombatWeaponSelect(session))
@@ -1683,10 +1863,60 @@ class CombatView(CombatActionView):
         cover_button.callback = self.take_cover
         self.add_item(cover_button)
 
+    async def allow_normal_action(self, interaction: discord.Interaction) -> bool:
+        member = self.session.participants[self.session.turn_index]
+        if combat_is_shocked(self.session, member):
+            await interaction.response.send_message("충격 상태에서는 탈출 판정만 할 수 있어요.", ephemeral=True)
+            return False
+        if pending_combat_status_check(self.session, member):
+            await interaction.response.send_message("상태 해제 판정을 먼저 다시 시도해 주세요.", ephemeral=True)
+            return False
+        return True
+
+    async def retry_status_checks(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            member = session.participants[session.turn_index]
+            if interaction.user.id != member.user_id:
+                await interaction.response.send_message("현재 차례인 사람만 재시도할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            await resolve_automatic_combat_status_checks(session, member)
+            if not pending_combat_status_check(session, member):
+                session.briefing = f"상태 해제 판정이 끝났어요. {member.character_name}의 턴이에요!"
+            await session.message.edit(content=render_combat_session(session), view=CombatView(session))
+
+    async def escape_status(self, interaction: discord.Interaction, index: int) -> None:
+        session = self.session
+        async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            member = session.participants[session.turn_index]
+            if interaction.user.id != member.user_id:
+                await interaction.response.send_message("현재 차례인 사람만 탈출할 수 있어요.", ephemeral=True)
+                return
+            if not 0 <= index < len(member.status_effects):
+                await interaction.response.send_message("현재 상태 목록을 다시 확인해 주세요.", ephemeral=True)
+                return
+            effect = member.status_effects[index]
+            if effect not in active_combat_statuses(session, member) or "충격" not in effect.spec.kinds:
+                await interaction.response.send_message("이미 해제된 상태예요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            succeeded = await attempt_combat_status_escape(session, member, effect)
+            if succeeded is None:
+                await session.message.edit(content=render_combat_session(session), view=CombatView(session))
+                return
+            await self.complete_attack_turn(f"{member.character_name}의 탈출 {'성공' if succeeded else '실패'}! 탈출 시도로 턴을 마쳤어요.")
+
     async def take_cover(self, interaction: discord.Interaction) -> None:
         session = self.session
         async with session.lock:
             if not await self.ensure_current(interaction):
+                return
+            if not await self.allow_normal_action(interaction):
                 return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
@@ -1707,14 +1937,14 @@ class CombatView(CombatActionView):
                 print(f"Combat cover read failed ({type(exc).__name__}).")
                 await interaction.followup.send("은밀행동 값을 읽지 못했어요. 엄폐 버튼을 눌러 다시 시도해 주세요.", ephemeral=True)
                 return
-            roll, rolls, modifier = roll_combat_d100(current)
+            roll, rolls, modifier = roll_combat_d100(current, session=session)
             result = coc_combat_check_result(roll, stealth)
             current.cover_active = result not in {"실패", "대실패"}
             current.movement_choice = "cover"
             outcome = "성공" if current.cover_active else "실패"
             effect = "다음 자기 턴까지 보통·먼 거리에서 받는 사격에 패널티 +1" if current.cover_active else "추가 불이익 없음"
             session.recent_logs.append(
-                f"은밀행동 주사위 {combat_roll_text(current, roll, rolls, modifier)} / 기준 {stealth}\n"
+                f"은밀행동 주사위 {combat_roll_text(current, roll, rolls, modifier, session=session)} / 기준 {stealth}\n"
                 f"【엄폐 {outcome}】 {current.character_name} · {effect}"
             )
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -1734,6 +1964,8 @@ class CombatView(CombatActionView):
         session = self.session
         async with session.lock:
             if not await self.ensure_current(interaction):
+                return
+            if not await self.allow_normal_action(interaction):
                 return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
@@ -1765,7 +1997,7 @@ class CombatView(CombatActionView):
                 await interaction.response.send_message("더 이동할 수 없는 거리예요.", ephemeral=True)
                 return
             await interaction.response.defer()
-            roll, rolls, modifier = roll_combat_d100(current)
+            roll, rolls, modifier = roll_combat_d100(current, session=session)
             current.movement_choice = "move"
             succeeded = roll <= current.dexterity
             distance = distance_order[new_index]
@@ -1773,7 +2005,7 @@ class CombatView(CombatActionView):
             outcome = "성공" if succeeded else "실패"
             movement_result = "추가 행동 가능" if succeeded else "턴 종료"
             log = (
-                f"민첩 주사위 {combat_roll_text(current, roll, rolls, modifier)} / 기준 {current.dexterity}\n"
+                f"민첩 주사위 {combat_roll_text(current, roll, rolls, modifier, session=session)} / 기준 {current.dexterity}\n"
                 f"【민첩 {outcome} · {movement_result}】 {current.character_name} ↔ {target.character_name} · {distance}"
             )
             session.recent_logs.append(log)
@@ -1803,6 +2035,8 @@ class CombatView(CombatActionView):
         session = self.session
         async with session.lock:
             if not await self.ensure_current(interaction):
+                return
+            if not await self.allow_normal_action(interaction):
                 return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
@@ -1842,6 +2076,9 @@ class CombatView(CombatActionView):
     ) -> None:
         session = self.session
         current = session.participants[session.turn_index]
+        if combat_is_shocked(session, current) or pending_combat_status_check(session, current):
+            await interaction.followup.send("상태 탈출·해제 판정을 먼저 진행해 주세요.", ephemeral=True)
+            return
         weapon = current.weapons[weapon_index]
         skill_name = normalize_weapon_skill_reference(weapon.skill_reference)
         try:
@@ -1925,23 +2162,24 @@ class CombatView(CombatActionView):
             outnumbered_bonus = 1 if target.defended_round == session.round_number else 0
             cover_penalty = 1 if target.cover_active and is_firearm_weapon(weapon) and distance != "근거리" else 0
             net_modifier = distance_modifier + outnumbered_bonus - burst_penalty - cover_penalty
-            roll, rolls, net_modifier = roll_combat_d100(current, net_modifier)
+            roll, rolls, net_modifier = roll_combat_d100(current, net_modifier, session=session)
             result = coc_combat_check_result(roll, attack.skill_value)
             die_text = f"1d100 [{', '.join(str(value) for value in rolls)}]"
             mode_text = (
                 f" (보너스 +{net_modifier})" if net_modifier > 0 else
                 f" (패널티 +{-net_modifier})" if net_modifier < 0 else
-                " (일반 굴림 · 보정 상쇄)" if any((distance_modifier, outnumbered_bonus, burst_penalty, cover_penalty, current.major_wound)) else ""
+                " (일반 굴림 · 보정 상쇄)" if any((distance_modifier, outnumbered_bonus, burst_penalty, cover_penalty, current.major_wound, maintaining_combat_shock(session, current))) else ""
             )
             outnumbered_text = " · 수적열세 보너스 +1" if outnumbered_bonus else ""
             cover_text = " · 엄폐 패널티 +1" if cover_penalty else ""
             wound_text = " · 중상 패널티 +1" if current.major_wound else ""
+            hold_text = " · 충격 유지 패널티 +1" if maintaining_combat_shock(session, current) else ""
             if is_projectile_weapon(weapon) and weapon.ammo is not None:
                 weapon.ammo -= 1
             ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
             shot_text = f" · {shot_number}발째" if is_projectile_weapon(weapon) else ""
             line = (
-                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{outnumbered_text}{cover_text}{wound_text}{ammo_text}\n"
+                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{outnumbered_text}{cover_text}{wound_text}{hold_text}{ammo_text}\n"
                 f"【{result}】 {current.character_name} → {target.character_name} · {weapon.name}{shot_text}"
             )
             session.recent_logs.append(line)
@@ -1962,8 +2200,8 @@ class CombatView(CombatActionView):
             if weapon.malfunction is not None and roll >= weapon.malfunction:
                 weapon.broken = True
                 luck_value = attack.luck_value
-                luck_roll, luck_rolls, luck_modifier = roll_combat_d100(current)
-                luck_text = combat_roll_text(current, luck_roll, luck_rolls, luck_modifier)
+                luck_roll, luck_rolls, luck_modifier = roll_combat_d100(current, session=session)
+                luck_text = combat_roll_text(current, luck_roll, luck_rolls, luck_modifier, session=session)
                 luck_succeeded = luck_value is not None and luck_roll <= luck_value
                 if luck_succeeded:
                     malfunction_log = (
@@ -1993,10 +2231,10 @@ class CombatView(CombatActionView):
         if not combat_is_active(current) and not attack.hits:
             await self.complete_attack_turn("공격자가 전투불능이 됐어요.")
             return
-        if not attack.hits and not is_melee_weapon(weapon):
+        if not attack.hits and (not is_melee_weapon(weapon) or combat_is_shocked(session, target)):
             await self.complete_attack_turn("공격이 빗나갔어요.")
             return
-        needs_response = is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp
+        needs_response = not combat_is_shocked(session, target) and (is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp)
         if needs_response:
             attack.stage = "defense"
             session.briefing = (
@@ -2052,6 +2290,8 @@ class CombatView(CombatActionView):
             await session.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
             await check_combat_major_wound(session, target, damage)
+            if combat_is_active(target):
+                apply_combat_weapon_statuses(session, attacker, target, weapon)
             if not combat_is_active(target):
                 break
 
@@ -2073,6 +2313,8 @@ class CombatView(CombatActionView):
         async with session.lock:
             if not await self.ensure_current(interaction):
                 return
+            if not await self.allow_normal_action(interaction):
+                return
             current = session.participants[session.turn_index]
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
@@ -2085,6 +2327,22 @@ class CombatView(CombatActionView):
             session.briefing = f"{with_particle(current.character_name, '가', '이')} 차례를 넘겼어요. 이제 {next_turn.character_name}의 턴이에요!"
             await refresh_combat_turn_weapons(session)
             await repost_combat_turn(session)
+
+class CombatStatusEscapeSelect(discord.ui.Select):
+    def __init__(self, session: CombatSession) -> None:
+        member = session.participants[session.turn_index]
+        effects = active_combat_statuses(session, member)
+        options = [discord.SelectOption(
+            label=trim_choice_name(f"{effect.weapon.name} · {'·'.join(effect.spec.kinds)} · {effect.spec.escape_skill}"),
+            value=str(index),
+            description=trim_choice_name(f"시전자: {session.participants[effect.source_index].character_name} · 성공·실패 모두 턴 종료"),
+        ) for index, effect in enumerate(member.status_effects) if effect in effects and "충격" in effect.spec.kinds]
+        super().__init__(placeholder="탈출할 상태 선택", options=options[:25])
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await CombatView(self.session).escape_status(interaction, int(self.values[0]))
+
 
 class CombatMoveTargetView(CombatActionView):
     def __init__(self, session: CombatSession, direction: int, targets: list[int]) -> None:
@@ -2208,6 +2466,9 @@ class CombatDefenseView(CombatActionView):
                 return
             attacker = session.participants[attack.attacker_index]
             defender = session.participants[attack.target_index]
+            if combat_is_shocked(session, defender):
+                await interaction.response.send_message("충격 상태에서는 회피·반격을 할 수 없어요.", ephemeral=True)
+                return
             if interaction.user.id != defender.user_id:
                 await interaction.response.send_message(f"이번 방어는 **{defender.character_name}** 차례예요.", ephemeral=True)
                 return
@@ -2247,14 +2508,14 @@ class CombatDefenseView(CombatActionView):
             attack.stage = "resolving"
             session.briefing = f"{defender.character_name}의 {action} 판정을 처리하고 있어요."
 
-            roll, rolls, modifier = roll_combat_d100(defender)
+            roll, rolls, modifier = roll_combat_d100(defender, session=session)
             defender.defended_round = session.round_number
             result = coc_combat_check_result(roll, defense_skill)
             ranks = {"대실패": 0, "실패": 0, "보통 성공": 1, "어려운 성공": 2, "극단적 성공": 3, "대성공": 4}
             rank = ranks[result]
             attack_ranks = [ranks[hit_result] for _hit_roll, hit_result, _shot in attack.hits]
             session.recent_logs.append(
-                f"주사위 {combat_roll_text(defender, roll, rolls, modifier)} / 기준 {defense_skill}\n"
+                f"주사위 {combat_roll_text(defender, roll, rolls, modifier, session=session)} / 기준 {defense_skill}\n"
                 f"【{result}】 {defender.character_name}의 {action} 판정"
             )
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]

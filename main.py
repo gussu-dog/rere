@@ -1055,6 +1055,9 @@ combat_sessions: dict[int, CombatSession] = {}
 
 
 def render_combat_session(session: CombatSession, prompt: str | None = None) -> str:
+    def plain_text(value: str) -> str:
+        return value.replace("`", "").replace("**", "")
+
     if session.phase == "combat":
         roster = " > ".join(f"{member.character_name}(민첩 {member.dexterity})" for member in session.participants)
     else:
@@ -1065,7 +1068,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
-    logs = "\n".join("- " + entry.replace("\n", "\n  ") for entry in session.recent_logs) or "- 기록 없음"
+    logs = "\n".join("- " + plain_text(entry).replace("\n", "\n  ") for entry in session.recent_logs) or "- 기록 없음"
     sections = [
         f"모의전투 | {session.round_number}라운드\n"
         f"거리: {session.distance}\n"
@@ -1073,7 +1076,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         f"행동 순서\n{roster}"
     ]
     if session.initiative_logs:
-        sections.append("선공 동률 판정\n" + "\n".join(session.initiative_logs[-2:]))
+        sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
     sections.append(f"최근 기록\n{logs}")
     if prompt:
         sections.append(prompt)
@@ -1321,17 +1324,13 @@ class CombatView(discord.ui.View):
             succeeded = roll <= current.dexterity
             session.distance = distance_order[new_index]
             outcome = "성공" if succeeded else "실패"
-            log = (
-                f"• {current.character_name} — 거리 이동 민첩 판정 `1d100 [{roll}]` / "
-                f"민첩 {current.dexterity}: {outcome} · {session.distance}"
-            )
-            if succeeded:
-                log += " · 이동에 성공해 공격할 수 있어요."
-            else:
-                log += " · 이동은 했지만 공격하지 못하고 차례가 넘어가요."
-                advance_combat_turn(session)
+            log = f"{current.character_name} — 거리 {session.distance} | 민첩 [{roll}] / {current.dexterity}: {outcome}"
             session.recent_logs.append(log)
             session.recent_logs = session.recent_logs[-4:]
+            await interaction.message.edit(content=render_combat_session(session), view=None)
+            await asyncio.sleep(0.7)
+            if not succeeded:
+                advance_combat_turn(session)
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
@@ -1385,7 +1384,6 @@ class CombatView(discord.ui.View):
                     return
                 shot_count = min(max(1, shot_count), 3, weapon.ammo)
 
-            shot_logs: list[str] = []
             for shot_number in range(1, shot_count + 1):
                 burst_penalty = shot_number - 1 if is_projectile_weapon(weapon) else 0
                 distance_modifier = 1 if is_projectile_weapon(weapon) and session.distance == "근거리" else -1 if is_projectile_weapon(weapon) and session.distance == "먼 거리" else 0
@@ -1393,11 +1391,16 @@ class CombatView(discord.ui.View):
                 rolls = [random.randint(1, 100) for _ in range(abs(net_modifier) + 1)]
                 roll = min(rolls) if net_modifier > 0 else max(rolls)
                 result = coc_combat_check_result(roll, skill_value)
-                die_text = f"`1d100 [{', '.join(str(value) for value in rolls)}]`"
+                die_text = f"1d100 [{', '.join(str(value) for value in rolls)}]"
                 mode_text = f" (보너스 +{net_modifier})" if net_modifier > 0 else f" (패널티 +{-net_modifier})" if net_modifier < 0 else ""
-                line = f"{shot_number}발째{mode_text}: {die_text} → **{result}**"
                 if is_projectile_weapon(weapon) and weapon.ammo is not None:
                     weapon.ammo -= 1
+                ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
+                line = f"{current.character_name} — {weapon.name} {shot_number}발째{mode_text}: {die_text} → {result}{ammo_text}"
+                session.recent_logs.append(line)
+                session.recent_logs = session.recent_logs[-4:]
+                await session.message.edit(content=render_combat_session(session), view=None)
+                await asyncio.sleep(0.7)
 
                 if weapon.malfunction is not None and roll >= weapon.malfunction:
                     weapon.broken = True
@@ -1405,26 +1408,20 @@ class CombatView(discord.ui.View):
                     luck_roll = random.randint(1, 100)
                     luck_succeeded = luck_value is not None and luck_roll <= luck_value
                     if luck_succeeded:
-                        line += f" · 고장! 행운 판정 `1d100 [{luck_roll}]` / 행운 {luck_value} **성공** — 무기만 고장 났어요."
+                        malfunction_log = f"{weapon.name} 고장 — 행운 [{luck_roll}] / {luck_value}: 성공 · 무기만 고장"
                     else:
                         luck_display = str(luck_value) if luck_value is not None else "확인 불가"
                         self_damage, damage_detail = roll_damage_formula(weapon.damage)
-                        line += (
-                            f" · 고장! 행운 판정 `1d100 [{luck_roll}]` / 행운 {luck_display} **실패**"
-                            f" — 본인 피해 `{damage_detail}` = **{self_damage}** (무기 피해식만 적용)"
+                        malfunction_log = (
+                            f"{weapon.name} 고장 — 행운 [{luck_roll}] / {luck_display}: 실패 · "
+                            f"본인 피해 {damage_detail} = {self_damage}"
                         )
-                    shot_logs.append(line)
+                    session.recent_logs.append(malfunction_log)
+                    session.recent_logs = session.recent_logs[-4:]
+                    await session.message.edit(content=render_combat_session(session), view=None)
+                    await asyncio.sleep(0.7)
                     break
-                shot_logs.append(line)
 
-            ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
-            damage_bonus_text = f" · DB {weapon.damage_bonus}" if weapon.damage_bonus else ""
-            weapon_state = " · 고장" if weapon.broken else ""
-            session.recent_logs.append(
-                f"• {current.character_name} — {weapon.name} / {skill_name} ({skill_value}){damage_bonus_text}{ammo_text}{weapon_state}\n  "
-                + "\n  ".join(shot_logs)
-            )
-            session.recent_logs = session.recent_logs[-4:]
             advance_combat_turn(session)
             await session.message.edit(content=render_combat_session(session), view=CombatView(session))
         except SheetError as exc:
@@ -1443,7 +1440,7 @@ class CombatView(discord.ui.View):
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
             await interaction.response.defer()
-            session.recent_logs.append(f"• {current.character_name} — 차례를 넘겼어요.")
+            session.recent_logs.append(f"{current.character_name} — 차례 넘김")
             session.recent_logs = session.recent_logs[-4:]
             advance_combat_turn(session)
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))

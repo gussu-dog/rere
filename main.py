@@ -1065,6 +1065,7 @@ class CombatSession:
     initiative_logs: list[str] = field(default_factory=list)
     recent_logs: list[str] = field(default_factory=list)
     pending_attack: PendingCombatAttack | None = None
+    briefing: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -1090,26 +1091,35 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
-    if session.pending_attack is not None:
-        defender = session.participants[session.pending_attack.target_index]
-        turn_text = f"{defender.character_name}의 방어 차례예요! (HP {defender.hp}/{defender.max_hp})"
-    else:
-        turn_text = f"{current.character_name}의 턴이에요! (HP {current.hp}/{current.max_hp})"
-    logs = "\n".join("- " + plain_text(entry).replace("\n", "\n  ") for entry in session.recent_logs) or "- 기록 없음"
     sections = [
         f"모의전투 | {session.round_number}라운드\n"
         f"거리: {session.distance}\n"
-        f"{turn_text}\n\n"
         f"행동 순서\n{roster}"
     ]
     if session.initiative_logs:
         sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
-    sections.append(f"최근 기록\n{logs}")
+    sections.append("")
+    log_section_index = len(sections) - 1
     if prompt:
         sections.append(prompt)
-    body = "\n\n".join(sections)
+    if session.pending_attack is not None:
+        attack = session.pending_attack
+        attacker = session.participants[attack.attacker_index]
+        defender = session.participants[attack.target_index]
+        briefing = f"{attacker.character_name}의 공격이에요. {with_particle(defender.character_name, '가', '이')} 방어를 선택해요!"
+    else:
+        briefing = session.briefing or f"{current.character_name}의 턴이에요!"
+    footer = f"현재 상황\n{briefing}"
+    visible_logs = session.recent_logs[:]
+    while True:
+        logs = "\n".join("- " + plain_text(entry).replace("\n", "\n  ") for entry in visible_logs) or "- 기록 없음"
+        sections[log_section_index] = f"최근 기록\n{logs}"
+        body = "\n\n".join([*sections, footer])
+        if len(body) <= 1850 or not visible_logs:
+            break
+        visible_logs.pop(0)
     if len(body) > 1850:
-        body = body[:1847] + "..."
+        body = body[:1850 - len(footer) - 5] + "\n\n" + footer
     return f"```text\n{body}\n```"
 
 
@@ -1369,6 +1379,7 @@ class CombatLobbyView(discord.ui.View):
                 session.phase = "combat"
                 session.round_number = 1
                 session.turn_index = 0
+                session.briefing = f"전투 시작! {session.participants[0].character_name}의 턴이에요!"
                 await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
         except Exception as exc:
             print(f"Combat start failed ({type(exc).__name__}).")
@@ -1462,8 +1473,18 @@ class CombatView(discord.ui.View):
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await interaction.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
+            movement = "거리를 좁혔어요" if direction < 0 else "거리를 넓혔어요"
             if not succeeded:
                 advance_combat_turn(session)
+                next_turn = session.participants[session.turn_index]
+                session.briefing = (
+                    f"{with_particle(current.character_name, '가', '이')} {movement}. 민첩 판정에 실패해 턴을 넘겨요. "
+                    f"이제 {next_turn.character_name}의 턴이에요!"
+                )
+            else:
+                session.briefing = (
+                    f"{with_particle(current.character_name, '가', '이')} {movement}! 아직 {current.character_name}의 턴이에요!"
+                )
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
@@ -1601,7 +1622,7 @@ class CombatView(discord.ui.View):
         if await finish_combat_if_decided(session):
             return
         if not attack.hits:
-            await self.complete_attack_turn()
+            await self.complete_attack_turn("공격이 빗나갔어요.")
             return
         needs_response = is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp
         if needs_response:
@@ -1612,7 +1633,7 @@ class CombatView(discord.ui.View):
             )
             return
         await self.apply_incoming_hits()
-        await self.complete_attack_turn()
+        await self.complete_attack_turn("피해가 적용됐어요.")
 
     async def apply_incoming_hits(self, avoided_hit_indexes: set[int] | None = None) -> None:
         session = self.session
@@ -1643,12 +1664,14 @@ class CombatView(discord.ui.View):
             if target.hp <= 0:
                 break
 
-    async def complete_attack_turn(self) -> None:
+    async def complete_attack_turn(self, summary: str = "공격이 끝났어요.") -> None:
         session = self.session
         session.pending_attack = None
         if await finish_combat_if_decided(session):
             return
         advance_combat_turn(session)
+        next_turn = session.participants[session.turn_index]
+        session.briefing = f"{summary} 이제 {next_turn.character_name}의 턴이에요!"
         await session.message.edit(content=render_combat_session(session), view=CombatView(session))
 
 
@@ -1664,6 +1687,8 @@ class CombatView(discord.ui.View):
             session.recent_logs.append(f"{current.character_name} — 차례 넘김")
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             advance_combat_turn(session)
+            next_turn = session.participants[session.turn_index]
+            session.briefing = f"{with_particle(current.character_name, '가', '이')} 차례를 넘겼어요. 이제 {next_turn.character_name}의 턴이에요!"
             await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     @discord.ui.button(label="전투 종료", style=discord.ButtonStyle.danger, emoji="🏁")
@@ -1802,9 +1827,17 @@ class CombatDefenseView(discord.ui.View):
             await session.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
 
+            turn_summary = f"{defender.character_name}의 {action} 판정이 끝났어요."
             if action == "회피":
                 avoided = {index for index, attack_rank in enumerate(attack_ranks) if rank >= attack_rank and rank > 0}
                 await CombatView(session).apply_incoming_hits(avoided)
+                turn_summary = (
+                    f"{with_particle(defender.character_name, '가', '이')} 공격을 피했어요."
+                    if len(avoided) == len(attack_ranks)
+                    else f"{with_particle(defender.character_name, '가', '이')} 공격을 일부 피했어요."
+                    if avoided
+                    else f"{with_particle(defender.character_name, '가', '이')} 공격을 피하지 못했어요."
+                )
             elif rank > max(attack_ranks, default=0):
                 assert counter_weapon is not None
                 damage, detail = roll_weapon_damage(counter_weapon, defender.strength, defender.size)
@@ -1816,10 +1849,12 @@ class CombatDefenseView(discord.ui.View):
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
                 await session.message.edit(content=render_combat_session(session), view=None)
                 await asyncio.sleep(0.7)
+                turn_summary = f"{defender.character_name}의 반격이 성공했어요."
             else:
                 await CombatView(session).apply_incoming_hits()
+                turn_summary = f"{defender.character_name}의 반격이 통하지 않았어요."
 
-            await CombatView(session).complete_attack_turn()
+            await CombatView(session).complete_attack_turn(turn_summary)
 
 
 async def start_combat(interaction: discord.Interaction) -> None:

@@ -2030,14 +2030,20 @@ def damage_bonus_formula(strength: int, size: int) -> str:
 
 def roll_weapon_damage(weapon: CombatWeapon, strength: int, size: int, critical: bool = False) -> tuple[int, str]:
     base_damage, base_detail = roll_damage_formula(weapon.damage)
-    bonus_formula = damage_bonus_formula(strength, size)
-    bonus_damage, bonus_detail = roll_damage_formula(bonus_formula)
-    if "/2" in weapon.damage_bonus.replace(" ", ""):
+    bonus_spec = re.sub(r"\s+", "", weapon.damage_bonus).casefold()
+    half_bonus = bonus_spec.endswith("/2")
+    bonus_formula = bonus_spec[:-2] if half_bonus else bonus_spec
+    if bonus_formula == "db":
+        bonus_formula = damage_bonus_formula(strength, size)
+    elif not re.fullmatch(r"[+-]?(?:\d+d\d+|\d+)(?:[+-](?:\d+d\d+|\d+))*", bonus_formula):
+        bonus_formula = ""
+    if bonus_formula:
+        bonus_damage, bonus_detail = roll_damage_formula(bonus_formula)
+    else:
+        bonus_damage, bonus_detail = 0, "없음"
+    if half_bonus and bonus_formula:
         bonus_damage //= 2
         bonus_detail = f"({bonus_detail})/2"
-    elif weapon.damage_bonus.strip().casefold() not in {"db", "db/2"}:
-        bonus_damage = 0
-        bonus_detail = "없음"
     maximum = maximum_damage_formula(weapon.damage) if critical and weapon.impaling else 0
     if maximum:
         total = maximum + base_damage + bonus_damage

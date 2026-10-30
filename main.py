@@ -2115,11 +2115,35 @@ def apply_combat_weapon_statuses(session: CombatSession, attacker: CombatPartici
     session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
 
 
-def apply_combat_hit_effects(session: CombatSession, attacker: CombatParticipant, target: CombatParticipant, weapon: CombatWeapon) -> None:
+async def apply_combat_hit_effects(session: CombatSession, attacker: CombatParticipant, target: CombatParticipant, weapon: CombatWeapon) -> None:
     if not combat_is_active(target):
         return
     source_index = next(i for i, item in enumerate(session.participants) if item is attacker)
     target_index = next(i for i, item in enumerate(session.participants) if item is target)
+    if any("마비" in effect.kinds for effect in weapon.effects):
+        roll, rolls, modifier = roll_combat_d100(target, session=session)
+        result = coc_combat_check_result(roll, target.constitution)
+        resisted = result not in {"실패", "대실패"}
+        outcome = f"【마비 저항 {'성공' if resisted else '실패'}】 {target.character_name}"
+        session.recent_logs.append(
+            f"건강 주사위 {combat_roll_text(target, roll, rolls, modifier, session=session)} / 기준 {target.constitution}\n{outcome}"
+        )
+        session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        session.last_attack_events.append(outcome)
+        await session.message.edit(content=render_combat_session(session), view=None)
+        await asyncio.sleep(0.7)
+        effects = []
+        paralysis_added = False
+        for effect in weapon.effects:
+            kinds = effect.kinds
+            if "마비" in kinds:
+                if resisted or paralysis_added:
+                    kinds = tuple(kind for kind in kinds if kind != "마비")
+                else:
+                    paralysis_added = True
+            if kinds:
+                effects.append(replace(effect, kinds=kinds))
+        weapon = replace(weapon, effects=effects)
     apply_combat_weapon_statuses(session, attacker, target, weapon)
     if weapon.snaring:
         target.snared = True
@@ -3044,7 +3068,7 @@ class CombatView(CombatActionView):
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await session.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
-            apply_combat_hit_effects(session, attacker, target, weapon)
+            await apply_combat_hit_effects(session, attacker, target, weapon)
             await check_combat_major_wound(session, target, damage)
             if not combat_is_active(target):
                 break
@@ -3485,7 +3509,7 @@ class CombatDefenseView(CombatActionView):
             session.briefing = f"{defender.character_name}의 반격이 성공했어요. 피해를 적용하고 있어요."
             await session.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
-            apply_combat_hit_effects(session, defender, attacker, counter_weapon)
+            await apply_combat_hit_effects(session, defender, attacker, counter_weapon)
             await check_combat_major_wound(session, attacker, damage)
             turn_summary = f"{defender.character_name}의 반격이 성공했어요."
         else:

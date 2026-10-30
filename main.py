@@ -2192,8 +2192,9 @@ class CombatLobbyView(discord.ui.View):
                 if player_count < minimum:
                     await interaction.followup.send(f"전투를 시작하려면 캐릭터가 {minimum}명 이상 참가해야 해요.", ephemeral=True)
                     return
+                difficulty_count = sum(2 if member.is_pulp else 1 for member in session.participants if not member.enemy_id)
                 for member in session.participants:
-                    randomize_raid_enemy(member, player_count)
+                    randomize_raid_enemy(member, difficulty_count)
 
                 async def load_combat_data(member: CombatParticipant) -> tuple[int | None, int | None, int | None, int | None, list[CombatWeapon]]:
                     dexterity, strength, constitution, size, weapons = await asyncio.gather(
@@ -2242,7 +2243,8 @@ class CombatLobbyView(discord.ui.View):
                         session.recent_logs.append(
                             f"【실험체 생성】 HP {member.max_hp} · 장갑 {member.armor} · 민첩 {member.dexterity} · "
                             f"근접전 {member.enemy_skills['fight']} · 회피 {member.enemy_skills['dodge']}\n"
-                            f"습득한 특수기: {CHIMERA_SPECIALS[member.enemy_special]} · 매 턴 행동 1d{member.action_dice_sides}회"
+                            f"습득한 특수기: {CHIMERA_SPECIALS[member.enemy_special]} · 매 턴 행동 1d{member.action_dice_sides}회\n"
+                            f"난이도 인원 {difficulty_count}명분 (일반 1 · 펄프 2)"
                         )
                 session.phase = "combat"
                 session.round_number = 1

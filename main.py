@@ -222,6 +222,11 @@ class CombatWeapon:
     malfunction: int | None = None
     broken: bool = False
     effects: list[CombatStatusSpec] = field(default_factory=list)
+    ammo_capacity: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.ammo_capacity is None and self.ammo is not None:
+            self.ammo_capacity = max(0, self.ammo)
 
 
 @dataclass
@@ -1088,7 +1093,7 @@ class CombatParticipant:
     max_hp: int = 0
     is_pulp: bool = False
     weapons: list[CombatWeapon] = field(default_factory=list)
-    weapon_states: dict[tuple[str, str, int], tuple[int | None, bool]] = field(default_factory=dict)
+    weapon_states: dict[tuple[str, str, int], tuple[int | None, bool, int | None]] = field(default_factory=dict)
     defended_round: int = 0
     cover_active: bool = False
     movement_choice: str = ""
@@ -1553,10 +1558,10 @@ def merge_combat_weapons(member: CombatParticipant, incoming: list[CombatWeapon]
 
     states = dict(member.weapon_states)
     for key, weapon in keyed(member.weapons):
-        states[key] = (weapon.ammo, weapon.broken)
+        states[key] = (weapon.ammo, weapon.broken, weapon.ammo_capacity)
     for key, weapon in keyed(incoming):
         if key in states:
-            weapon.ammo, weapon.broken = states[key]
+            weapon.ammo, weapon.broken, weapon.ammo_capacity = states[key]
     member.weapons = incoming
     member.weapon_states = states
 
@@ -2148,7 +2153,7 @@ class CombatActionView(discord.ui.View):
                 or session.message is None or interaction.message.id != session.message.id
                 or session.turn_index != self.turn_index or session.pending_attack is not self.attack
                 or (self.attack is not None and self.attack.stage != "defense")):
-            await interaction.response.send_message("이미 처리된 선택이에요. 현재 화면을 확인해 주세요.", ephemeral=True)
+            await send_response(interaction, "이미 처리된 선택이에요. 현재 화면을 확인해 주세요.", ephemeral=True)
             return False
         return True
 
@@ -2458,14 +2463,16 @@ class CombatView(CombatActionView):
             if weapon.broken:
                 await interaction.response.send_message(f"`{weapon.name}`은(는) 고장 나서 사용할 수 없어요.", ephemeral=True)
                 return
-            if is_projectile_weapon(weapon) and (weapon.ammo is None or weapon.ammo <= 0):
+            if (is_projectile_weapon(weapon) and (weapon.ammo is None or weapon.ammo <= 0)
+                    and not (is_firearm_weapon(weapon) and weapon.ammo_capacity)):
                 await interaction.response.send_message(f"`{weapon.name}`의 탄약이 없어요.", ephemeral=True)
                 return
             if is_projectile_weapon(weapon):
                 await interaction.response.edit_message(
                     content=render_combat_session(
                         session,
-                        f"선택 무기: {weapon.name}\n남은 탄약: {weapon.ammo}발\n연사 발수 선택",
+                        f"선택 무기: {weapon.name}\n남은 탄약: {weapon.ammo}발\n"
+                        + ("발수 선택 또는 재장전 (재장전하면 턴 종료)" if is_firearm_weapon(weapon) else "연사 발수 선택"),
                     ),
                     view=CombatShotCountView(session, weapon_index),
                 )
@@ -2804,7 +2811,50 @@ class CombatShotCountSelect(discord.ui.Select):
 class CombatShotCountView(CombatActionView):
     def __init__(self, session: CombatSession, weapon_index: int) -> None:
         super().__init__(session, back=True)
-        self.add_item(CombatShotCountSelect(session, weapon_index))
+        self.weapon_index = weapon_index
+        weapon = session.participants[session.turn_index].weapons[weapon_index]
+        if weapon.ammo is not None and weapon.ammo > 0:
+            self.add_item(CombatShotCountSelect(session, weapon_index))
+        if is_firearm_weapon(weapon):
+            capacity = weapon.ammo_capacity or 0
+            reload_button = discord.ui.Button(
+                label=f"재장전 · {capacity}발로 채우기 (턴 종료)", style=discord.ButtonStyle.primary,
+                disabled=weapon.broken or capacity <= 0 or weapon.ammo == capacity,
+            )
+            reload_button.callback = self.reload_weapon
+            self.add_item(reload_button)
+
+    async def reload_weapon(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        await interaction.response.defer()
+        async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            current = session.participants[session.turn_index]
+            if session.pending_attack is not None or not combat_is_active(current):
+                await interaction.followup.send("자기 행동 차례에만 재장전할 수 있어요.", ephemeral=True)
+                return
+            if interaction.user.id != current.user_id:
+                await interaction.followup.send("현재 차례인 캐릭터만 재장전할 수 있어요.", ephemeral=True)
+                return
+            if combat_is_shocked(session, current) or pending_combat_status_check(session, current):
+                await interaction.followup.send("상태 탈출·해제 판정을 먼저 진행해 주세요.", ephemeral=True)
+                return
+            if not 0 <= self.weapon_index < len(current.weapons):
+                await interaction.followup.send("무기 선택을 다시 확인해 주세요.", ephemeral=True)
+                return
+            weapon = current.weapons[self.weapon_index]
+            capacity = weapon.ammo_capacity or 0
+            if not is_firearm_weapon(weapon) or weapon.broken or capacity <= 0 or weapon.ammo == capacity:
+                await interaction.followup.send("현재 재장전할 수 없는 무기예요.", ephemeral=True)
+                return
+            previous_ammo = weapon.ammo or 0
+            weapon.ammo = capacity
+            session.recent_logs.append(
+                f"【재장전 · 턴 종료】 {current.character_name} · {weapon.name} · 탄약 {previous_ammo} → {capacity}"
+            )
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            await CombatView(session).complete_attack_turn(f"{with_particle(current.character_name, '가', '이')} {with_particle(weapon.name, '를', '을')} 재장전했어요.")
 
 
 class CombatTargetSelect(discord.ui.Select):

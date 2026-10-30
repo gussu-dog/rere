@@ -1910,7 +1910,6 @@ class CombatJoinSelect(discord.ui.Select):
                 raise ValueError("Invalid character choice")
             joined = await join_combat(interaction, view.choices[index][0], expected_session=view.session)
             if joined:
-                await interaction.message.edit(content="참가했어요! 다른 캐릭터도 참가시키려면 모집창의 참여 버튼을 다시 눌러 주세요.", view=None)
                 view.stop()
         except (ValueError, IndexError):
             await send_response(interaction, "캐릭터 선택을 다시 확인해 주세요.", ephemeral=True)
@@ -2838,26 +2837,28 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
     if session is None or session.phase != "lobby" or (expected_session is not None and session is not expected_session):
         await send_response(interaction, "이 모집은 이미 종료됐어요. 새 모집창의 참여 버튼을 눌러 주세요!", ephemeral=True)
         return False
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    # A component update edits the private picker through its interaction token.
+    # Message.edit uses the bot endpoint, which cannot edit ephemeral messages.
+    await interaction.response.defer()
     owned = await registry.get_character_choices_for_user(interaction.user.id)
     selected = next((value for value, _ in owned if value.casefold() == character.casefold()), None)
     if selected is None:
-        await interaction.followup.send("직접 등록한 캐릭터만 참가시킬 수 있어요. 캐릭터 선택 목록에서 골라 주세요.", ephemeral=True)
+        await interaction.edit_original_response(content="직접 등록한 캐릭터만 참가시킬 수 있어요. 참여 버튼으로 다시 선택해 주세요.", view=None)
         return False
     resolved = await registry.resolve_character_reference(selected)
     if resolved is None:
-        await interaction.followup.send("캐릭터 시트를 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요.", ephemeral=True)
+        await interaction.edit_original_response(content="캐릭터 시트를 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요.", view=None)
         return False
     display_name = selected.partition("|")[2].strip()
     async with session.lock:
         if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
-            await interaction.followup.send("모집이 이미 끝났어요.", ephemeral=True)
+            await interaction.edit_original_response(content="모집이 이미 끝났어요.", view=None)
             return False
         if sum(not member.enemy_id for member in session.participants) >= 8:
-            await interaction.followup.send("모의전투에는 캐릭터를 최대 8명까지 참가시킬 수 있어요.", ephemeral=True)
+            await interaction.edit_original_response(content="모의전투에는 캐릭터를 최대 8명까지 참가시킬 수 있어요.", view=None)
             return False
         if any(member.character_value.casefold() == selected.casefold() for member in session.participants):
-            await interaction.followup.send("이 캐릭터는 이미 참가했어요.", ephemeral=True)
+            await interaction.edit_original_response(content="이 캐릭터는 이미 참가했어요.", view=None)
             return False
         session.participants.append(CombatParticipant(
             interaction.user.id,
@@ -2867,8 +2868,18 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
             is_pulp=resolved[0] == SORTED_TABLE_SPREADSHEET_ID,
         ))
         if session.message is not None:
-            await session.message.edit(content=render_combat_session(session), view=CombatLobbyView(session))
-    await interaction.followup.send(f"**{display_name}** 캐릭터가 모의전투에 참가했어요!", ephemeral=True)
+            try:
+                await session.message.edit(content=render_combat_session(session), view=CombatLobbyView(session))
+            except (discord.HTTPException, OSError) as exc:
+                print(f"Combat lobby roster refresh failed after join ({type(exc).__name__}).")
+    try:
+        await interaction.edit_original_response(
+            content=f"**{display_name}** 캐릭터가 모의전투에 참가했어요! 다른 캐릭터는 모집창의 참여 버튼으로 추가해 주세요.",
+            view=None,
+        )
+    except (discord.HTTPException, OSError) as exc:
+        # Registration has succeeded. A UI cleanup error must not report failure.
+        print(f"Combat join confirmation update failed ({type(exc).__name__}).")
     return True
 
 

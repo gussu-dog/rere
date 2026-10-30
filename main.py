@@ -1017,9 +1017,6 @@ async def send_flat_response(interaction: discord.Interaction, content: str) -> 
 
 
 async def character_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    mode = getattr(interaction.namespace, "mode", None) or getattr(interaction.namespace, "구분", None)
-    if getattr(mode, "value", mode) == "모집":
-        return []
     try:
         choices = await registry.get_character_choices_for_user(interaction.user.id)
         matches = [(value, name) for value, name in choices if not current or current.casefold() in name.casefold()]
@@ -1273,7 +1270,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
     if session.phase == "lobby":
         players = sum(not member.enemy_id for member in session.participants)
         enemy = f"\n상대: {RAID_ENEMIES[session.enemy_id]['name']} · HP·공격·회피·반격 없음\n모집자가 훈련 종료를 눌러 마칠 수 있어요." if session.mode == "레이드" else ""
-        body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n/모의전투에서 구분:참여를 선택해 등록"
+        body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
         return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
@@ -1786,6 +1783,31 @@ class CombatLobbyView(discord.ui.View):
         super().__init__(timeout=None)
         self.session = session
 
+    @discord.ui.button(label="참여", style=discord.ButtonStyle.primary)
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        session = self.session
+        if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
+            await interaction.response.send_message("이 모집은 이미 종료됐어요.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            owned = await registry.get_character_choices_for_user(interaction.user.id)
+            if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
+                await interaction.followup.send("모집이 이미 끝났어요.", ephemeral=True)
+                return
+            joined = {member.character_value.casefold() for member in session.participants}
+            choices = [(value, label) for value, label in owned if value.casefold() not in joined]
+            if not choices:
+                await interaction.followup.send("참가할 캐릭터가 없어요. `/캐릭터등록`을 먼저 해 주세요. 이미 참가한 캐릭터는 목록에서 제외돼요.", ephemeral=True)
+                return
+            await interaction.followup.send(
+                "참가할 캐릭터를 선택해 주세요.",
+                view=CombatJoinView(session, interaction.user.id, choices), ephemeral=True,
+            )
+        except Exception as exc:
+            print(f"Combat join choices failed ({type(exc).__name__}).")
+            await interaction.followup.send("캐릭터 목록을 읽지 못했어요. 참여 버튼을 다시 눌러 주세요.", ephemeral=True)
+
     @discord.ui.button(label="전투 시작", style=discord.ButtonStyle.primary, emoji="⚔️")
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         session = self.session
@@ -1862,9 +1884,72 @@ class CombatLobbyView(discord.ui.View):
             await interaction.response.send_message("모집을 연 사람만 취소할 수 있어요.", ephemeral=True)
             return
         async with session.lock:
+            if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
+                await interaction.response.send_message("이 모집은 이미 종료됐어요.", ephemeral=True)
+                return
             combat_sessions.pop(session.channel_id, None)
             await interaction.response.edit_message(content="모의전투 모집을 취소했어요.", view=None)
         self.stop()
+
+
+class CombatJoinSelect(discord.ui.Select):
+    def __init__(self, choices: list[tuple[str, str]], page: int) -> None:
+        start = page * 25
+        # Short local indexes avoid Discord's 100-character option value limit.
+        options = [discord.SelectOption(label=trim_choice_name(label), value=str(index))
+                   for index, (_value, label) in enumerate(choices[start:start + 25], start=start)]
+        super().__init__(placeholder="참가할 캐릭터 선택", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not await view.interaction_check(interaction):
+            return
+        try:
+            index = int(self.values[0])
+            if not view.page * 25 <= index < min((view.page + 1) * 25, len(view.choices)):
+                raise ValueError("Invalid character choice")
+            joined = await join_combat(interaction, view.choices[index][0], expected_session=view.session)
+            if joined:
+                await interaction.message.edit(content="참가했어요! 다른 캐릭터도 참가시키려면 모집창의 참여 버튼을 다시 눌러 주세요.", view=None)
+                view.stop()
+        except (ValueError, IndexError):
+            await send_response(interaction, "캐릭터 선택을 다시 확인해 주세요.", ephemeral=True)
+        except Exception as exc:
+            print(f"Combat character join failed ({type(exc).__name__}).")
+            await send_response(interaction, "참가 처리를 완료하지 못했어요. 모집창을 확인하고 참여 버튼을 다시 눌러 주세요.", ephemeral=True)
+
+
+class CombatJoinView(discord.ui.View):
+    def __init__(self, session: CombatSession, user_id: int, choices: list[tuple[str, str]], page: int = 0) -> None:
+        super().__init__(timeout=300)
+        self.session = session
+        self.user_id = user_id
+        self.choices = choices
+        self.page = page
+        self.add_item(CombatJoinSelect(choices, page))
+        for direction, label in ((-1, "이전"), (1, "다음")):
+            if 0 <= page + direction < (len(choices) + 24) // 25:
+                button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=1)
+                async def change_page(interaction: discord.Interaction, step: int = direction) -> None:
+                    if not await self.interaction_check(interaction):
+                        return
+                    next_page = self.page + step
+                    await interaction.response.edit_message(
+                        content=f"참가할 캐릭터를 선택해 주세요. ({next_page + 1}/{(len(choices) + 24) // 25})",
+                        view=CombatJoinView(session, user_id, choices, next_page),
+                    )
+                    self.stop()
+                button.callback = change_page
+                self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("본인의 참여 버튼으로 캐릭터를 선택해 주세요.", ephemeral=True)
+            return False
+        if combat_sessions.get(self.session.channel_id) is not self.session or self.session.phase != "lobby":
+            await interaction.response.send_message("이 모집은 이미 종료됐어요.", ephemeral=True)
+            return False
+        return True
 
 
 class CombatActionView(discord.ui.View):
@@ -2748,32 +2833,32 @@ async def start_combat(interaction: discord.Interaction, mode: str = "대련", e
     session.message = await interaction.original_response()
 
 
-async def join_combat(interaction: discord.Interaction, character: str) -> None:
+async def join_combat(interaction: discord.Interaction, character: str, *, expected_session: CombatSession | None = None) -> bool:
     session = combat_sessions.get(interaction.channel_id)
-    if session is None or session.phase != "lobby":
-        await send_response(interaction, "이 채널에 모집 중인 모의전투가 없어요. `/모의전투`에서 구분:모집을 선택해 주세요!", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
+    if session is None or session.phase != "lobby" or (expected_session is not None and session is not expected_session):
+        await send_response(interaction, "이 모집은 이미 종료됐어요. 새 모집창의 참여 버튼을 눌러 주세요!", ephemeral=True)
+        return False
+    await interaction.response.defer(ephemeral=True, thinking=True)
     owned = await registry.get_character_choices_for_user(interaction.user.id)
     selected = next((value for value, _ in owned if value.casefold() == character.casefold()), None)
     if selected is None:
         await interaction.followup.send("직접 등록한 캐릭터만 참가시킬 수 있어요. 캐릭터 선택 목록에서 골라 주세요.", ephemeral=True)
-        return
+        return False
     resolved = await registry.resolve_character_reference(selected)
     if resolved is None:
         await interaction.followup.send("캐릭터 시트를 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요.", ephemeral=True)
-        return
+        return False
     display_name = selected.partition("|")[2].strip()
     async with session.lock:
         if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
             await interaction.followup.send("모집이 이미 끝났어요.", ephemeral=True)
-            return
+            return False
         if sum(not member.enemy_id for member in session.participants) >= 8:
             await interaction.followup.send("모의전투에는 캐릭터를 최대 8명까지 참가시킬 수 있어요.", ephemeral=True)
-            return
+            return False
         if any(member.character_value.casefold() == selected.casefold() for member in session.participants):
             await interaction.followup.send("이 캐릭터는 이미 참가했어요.", ephemeral=True)
-            return
+            return False
         session.participants.append(CombatParticipant(
             interaction.user.id,
             interaction.user.display_name,
@@ -2784,35 +2869,18 @@ async def join_combat(interaction: discord.Interaction, character: str) -> None:
         if session.message is not None:
             await session.message.edit(content=render_combat_session(session), view=CombatLobbyView(session))
     await interaction.followup.send(f"**{display_name}** 캐릭터가 모의전투에 참가했어요!", ephemeral=True)
+    return True
 
 
-@bot.tree.command(name="모의전투", description="대련·레이드를 모집하거나 캐릭터로 참여해요!")
+@bot.tree.command(name="모의전투", description="대련·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.")
 @app_commands.guild_only()
-@app_commands.rename(mode="구분", raid="레이드", character="캐릭터")
-@app_commands.choices(mode=[
-    app_commands.Choice(name="모집", value="모집"),
-    app_commands.Choice(name="참여", value="참여"),
-], raid=[app_commands.Choice(name="연습용 허수아비", value="dummy")])
-@app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.", character="참여할 때 선택해 주세요.")
-@app_commands.autocomplete(character=character_autocomplete)
+@app_commands.rename(raid="레이드")
+@app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy")])
+@app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.")
 async def combat_command(
     interaction: discord.Interaction,
-    mode: app_commands.Choice[str],
     raid: app_commands.Choice[str] | None = None,
-    character: str | None = None,
 ) -> None:
-    if mode.value == "참여":
-        if raid is not None:
-            await send_response(interaction, "참여할 때는 캐릭터만 선택해 주세요. 레이드 상대는 모집할 때 정해요.", ephemeral=True)
-            return
-        if not character:
-            await send_response(interaction, "참여할 캐릭터를 선택해 주세요.", ephemeral=True)
-            return
-        await join_combat(interaction, character)
-        return
-    if character:
-        await send_response(interaction, "모집할 때는 캐릭터를 비워 주세요. 모집 후 구분:참여로 참가할 수 있어요.", ephemeral=True)
-        return
     await start_combat(interaction, "레이드" if raid else "대련", raid.value if raid else "")
 
 

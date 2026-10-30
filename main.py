@@ -2788,26 +2788,22 @@ async def join_combat(interaction: discord.Interaction, character: str) -> None:
 
 @bot.tree.command(name="모의전투", description="대련·레이드를 모집하거나 캐릭터로 참여해요!")
 @app_commands.guild_only()
-@app_commands.rename(mode="구분", character="캐릭터", kind="종류", enemy="상대")
+@app_commands.rename(mode="구분", raid="레이드", character="캐릭터")
 @app_commands.choices(mode=[
     app_commands.Choice(name="모집", value="모집"),
     app_commands.Choice(name="참여", value="참여"),
-], kind=[
-    app_commands.Choice(name="레이드", value="레이드"),
-    app_commands.Choice(name="대련", value="대련"),
-], enemy=[app_commands.Choice(name="연습용 허수아비", value="dummy")])
-@app_commands.describe(character="참여할 때 선택해 주세요.", kind="모집할 때 선택해 주세요. 생략하면 대련이에요.", enemy="레이드를 모집할 때 선택해 주세요. 생략하면 허수아비예요.")
+], raid=[app_commands.Choice(name="연습용 허수아비", value="dummy")])
+@app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.", character="참여할 때 선택해 주세요.")
 @app_commands.autocomplete(character=character_autocomplete)
 async def combat_command(
     interaction: discord.Interaction,
     mode: app_commands.Choice[str],
+    raid: app_commands.Choice[str] | None = None,
     character: str | None = None,
-    kind: app_commands.Choice[str] | None = None,
-    enemy: app_commands.Choice[str] | None = None,
 ) -> None:
     if mode.value == "참여":
-        if kind is not None or enemy is not None:
-            await send_response(interaction, "참여할 때는 캐릭터만 선택해 주세요. 종류와 상대는 모집할 때 정해요.", ephemeral=True)
+        if raid is not None:
+            await send_response(interaction, "참여할 때는 캐릭터만 선택해 주세요. 레이드 상대는 모집할 때 정해요.", ephemeral=True)
             return
         if not character:
             await send_response(interaction, "참여할 캐릭터를 선택해 주세요.", ephemeral=True)
@@ -2817,11 +2813,7 @@ async def combat_command(
     if character:
         await send_response(interaction, "모집할 때는 캐릭터를 비워 주세요. 모집 후 구분:참여로 참가할 수 있어요.", ephemeral=True)
         return
-    battle_kind = kind.value if kind else "대련"
-    if battle_kind == "대련" and enemy is not None:
-        await send_response(interaction, "상대 선택은 레이드에서만 사용해 주세요.", ephemeral=True)
-        return
-    await start_combat(interaction, battle_kind, (enemy.value if enemy else "dummy") if battle_kind == "레이드" else "")
+    await start_combat(interaction, "레이드" if raid else "대련", raid.value if raid else "")
 
 
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")

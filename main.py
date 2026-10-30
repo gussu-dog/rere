@@ -1293,7 +1293,9 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
     footer = f"현재 상황\n{briefing}"
     visible_logs = session.recent_logs[:]
     while True:
-        logs = "\n".join("- " + plain_text(entry).replace("\n", "\n  ") for entry in visible_logs) or "- 기록 없음"
+        entries = ["- " + plain_text(entry).replace("\n", "\n  ") for entry in visible_logs]
+        logs = ("\n".join(entries[:-1]) + "\n\n" + entries[-1] if len(entries) > 1
+                else entries[0] if entries else "- 기록 없음")
         sections[log_section_index] = f"최근 기록\n{logs}"
         body = "\n\n".join([*sections, footer])
         if len(body) <= 1850 or not visible_logs:

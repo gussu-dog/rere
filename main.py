@@ -239,6 +239,7 @@ class CombatStatusEffect:
     size: int
     last_tick: int = 0
     escape_pending: bool = False
+    retrievable: bool = False
 
 
 @dataclass
@@ -1110,9 +1111,13 @@ class CombatParticipant:
     pattern_step: int = 0
     regeneration_used: bool = False
     recovering: bool = False
-    pounce_target: int | None = None
-    pounce_dodged: bool = False
     enemy_special: str = ""
+    actions_left: int = 0
+    summons_used: int = 0
+    round_attack_due: int = 0
+    round_attack_target: int | None = None
+    round_attack_distance: str = "보통거리"
+    spawn_round: int = 0
 
 
 @dataclass
@@ -1152,6 +1157,9 @@ class CombatSession:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     mode: str = "대련"
     enemy_id: str = ""
+    turn_order: list[int] = field(default_factory=list)
+    round_limit: int = 0
+    raid_timed_out: bool = False
 
 
 combat_sessions: dict[int, CombatSession] = {}
@@ -1163,6 +1171,8 @@ RAID_ENEMIES = {
               "fight": 0, "dodge": 0, "gun": 0, "luck": 50},
     "chimera": {"name": "실험키메라", "dex": 55, "con": 60, "str": 60, "size": 65,
                 "fight": 50, "dodge": 25, "gun": 0, "luck": 50},
+    "minion": {"name": "실험체", "dex": 35, "con": 30, "str": 20, "size": 20,
+               "fight": 35, "dodge": 15, "gun": 0, "luck": 30},
 }
 
 CHIMERA_SPECIALS = {
@@ -1173,6 +1183,12 @@ CHIMERA_SPECIAL_DETAILS = {
     "poison": "1d3 피해 + 지속 · 매 턴 시작 1d3 피해 후 건강 판정으로 해제 · 회피 가능",
     "tail": "1d4 피해 · 명중하면 키메라와의 거리가 한 단계 멀어짐",
     "charge": "민첩 판정으로 근거리까지 돌진 · 성공하면 1d6 공격, 실패하면 이동 후 턴 종료",
+}
+CHIMERA_ROUND_WARNINGS = {
+    7: "통로 너머에서 철문이 하나씩 닫히는 소리가 들려요. 아직 돌아갈 수 있을까요?",
+    8: "경보음이 갑자기 끊겼어요. 벽 너머에서 무언가가 천천히 움직이고 있어요.",
+    9: "출구 아래로 검은 액체가 스며들어요. 이제 이곳에 남은 시간이 얼마 없어요.",
+    10: "마지막 라운드예요! 이번 라운드가 끝나면 실험구역이 봉쇄돼요. 반드시 키메라를 쓰러뜨려야 해요!",
 }
 
 
@@ -1195,8 +1211,10 @@ def randomize_raid_enemy(member: CombatParticipant, player_count: int) -> None:
     member.pattern_step = 0
     member.regeneration_used = False
     member.recovering = False
-    member.pounce_target = None
-    member.pounce_dodged = False
+    member.actions_left = 0
+    member.summons_used = 0
+    member.round_attack_due = 0
+    member.round_attack_target = None
     member.enemy_special = random.choice(list(CHIMERA_SPECIALS))
 
 
@@ -1219,6 +1237,8 @@ async def combat_skill_value(member: CombatParticipant, skill: str) -> int | Non
 async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) -> list[CombatWeapon]:
     if not member.enemy_id:
         return await registry.get_combat_weapons(member.character_value, refresh=refresh)
+    if member.enemy_id == "minion":
+        return [CombatWeapon("비무장 · 물어뜯기", "근접전 | 격투", "1d3")]
     if member.enemy_id == "chimera":
         weapons = [CombatWeapon("비무장 · 발톱", "근접전 | 격투", "1d6"),
                    CombatWeapon("덮치기", "근접전 | 격투", "1d8")]
@@ -1282,6 +1302,13 @@ def maintaining_combat_shock(session: CombatSession | None, member: CombatPartic
     )
 
 
+def releasable_combat_statuses(session: CombatSession, member: CombatParticipant) -> list[tuple[CombatParticipant, CombatStatusEffect]]:
+    source_index = next(i for i, participant in enumerate(session.participants) if participant is member)
+    return [(target, effect) for target in session.participants if combat_is_active(target)
+            for effect in active_combat_statuses(session, target)
+            if effect.source_index == source_index and (effect.retrievable or "충격" in effect.spec.kinds)]
+
+
 def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: CombatSession | None = None) -> tuple[int, list[int], int]:
     modifier -= int(member.major_wound)
     modifier -= int(maintaining_combat_shock(session, member))
@@ -1314,10 +1341,16 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         return value.replace("`", "").replace("**", "")
 
     if session.phase == "combat":
+        order = session.turn_order or list(range(len(session.participants)))
+        roster_members = [session.participants[i] for i in order]
+        roster_members += [member for i, member in enumerate(session.participants) if i not in order]
         roster = "\n".join(
             (f"{member.character_name}(누적 피해 {member.damage_received} · HP 없음)" if member.enemy_id == "dummy" else
             f"{member.character_name}(민첩 {member.dexterity} · HP {member.hp}/{member.max_hp}"
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
+            f"{' · 충격 면역' if member.enemy_id == 'chimera' else ''}"
+            f"{' · 남은 행동 ' + str(member.actions_left) + '회' if member.enemy_id == 'chimera' and member is session.participants[session.turn_index] and member.actions_left else ''}"
+            f"{' · ' + str(member.spawn_round) + '라운드부터 행동' if member.spawn_round > session.round_number else ''}"
             f"{' · 특수기 ' + CHIMERA_SPECIALS[member.enemy_special] if member.enemy_special else ''}"
             f"{' · 재생 후 회복 중' if member.recovering else ''}"
             f"{' · 엄폐 중' if member.cover_active and combat_is_active(member) else ''}"
@@ -1326,7 +1359,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
             f"{' · 지속' if combat_is_active(member) and any('지속' in effect.spec.kinds for effect in active_combat_statuses(session, member)) else ''}"
             f"{' · 기권' if member.forfeited else ' · 기절(탈락)' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''})")
-            for member in session.participants
+            for member in roster_members
         )
     else:
         roster = "\n".join(
@@ -1340,7 +1373,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         if session.mode == "레이드":
             enemy = ("\n상대: 연습용 허수아비 · HP·공격·회피·반격 없음\n모집자가 훈련 종료를 눌러 마칠 수 있어요."
                      if session.enemy_id == "dummy" else
-                     "\n상대: 실험키메라 · 장갑 1\n시작 시 능력치·특수기 1개를 무작위로 정해요.")
+                     "\n상대: 실험키메라 · 장갑 1 · 충격 면역\n시작 시 능력치·특수기 1개를 무작위로 정해요.\n제한 10라운드 · 시간 초과 시 전멸")
         body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
         return f"```text\n{body}\n```"
 
@@ -1350,15 +1383,18 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         for index in combat_targets(session)
     )
     sections = [
-        f"모의전투 · {session.mode} | {session.round_number}라운드\n"
-        f"{current.character_name} 기준 거리: {distances}\n"
+        f"모의전투 · {session.mode} | {session.round_number}라운드"
+        + (f" / 제한 {session.round_limit}라운드" if session.round_limit else "") + "\n"
+        + f"{current.character_name} 기준 거리: {distances}\n"
         f"행동 순서\n{roster}"
     ]
+    if session.round_limit and session.round_number in CHIMERA_ROUND_WARNINGS:
+        sections.append("【실험구역 경고】\n" + CHIMERA_ROUND_WARNINGS[session.round_number])
     for enemy in session.participants:
-        if enemy.pounce_target is not None and combat_is_active(enemy):
-            target = session.participants[enemy.pounce_target]
+        if enemy.round_attack_target is not None and combat_is_active(enemy):
+            target = session.participants[enemy.round_attack_target]
             if combat_is_active(target):
-                sections.append(f"【도약 예고】 {target.character_name}의 차례가 끝나면 덮치기!\n키메라에게서 거리를 넓히면 공격에 패널티 +1. 회피·반격 가능.")
+                sections.append(f"【공격 예고】 {enemy.round_attack_due}라운드 시작 · {target.character_name}에게 폭주 도약!\n거리를 넓히면 공격 패널티 +1 · 회피·반격 가능")
     if session.initiative_logs:
         sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
     sections.append("")
@@ -1433,14 +1469,18 @@ def render_combat_winner(session: CombatSession) -> str:
             outcome = f"허수아비 훈련 종료 · 총 {total} 데미지!"
         else:
             players = any(not member.enemy_id for member in survivors)
-            enemies = any(member.enemy_id for member in survivors)
+            enemies = any(member.enemy_id == "chimera" for member in survivors)
             outcome = ("레이드 성공! 참가자 팀의 승리!" if players and not enemies else
-                       "무승부 · 양쪽 모두 전투 탈락" if not survivors else
+                       "무승부 · 양쪽 모두 전투 탈락" if not players and not enemies else
                        "레이드 중단" if players and enemies else "레이드 실패 · 참가자 모두 전투 탈락")
             outcome += f" · 총 {total} 데미지"
+            if session.raid_timed_out:
+                outcome = f"시간 초과 · 참가자 전멸 · 총 {total} 데미지"
     ranking = render_combat_ranking(session)
     summary_budget = max(0, 1850 - len(outcome) - len(ranking))
-    if session.last_attack:
+    if session.raid_timed_out:
+        summary = "마지막 상황\n철문이 닫히고 검은 안개가 실험구역을 삼켰어요.\n참가자들은 누구도 돌아오지 못했어요."
+    elif session.last_attack:
         events = session.last_attack_events[-4:]
         while True:
             details = "\n".join(events) or "피해 적용 전에 전투를 종료했어요."
@@ -1458,7 +1498,8 @@ def render_combat_winner(session: CombatSession) -> str:
 async def finish_combat_if_decided(session: CombatSession) -> bool:
     survivors = [member for member in session.participants if combat_is_active(member)]
     if session.mode == "레이드":
-        if any(not member.enemy_id for member in survivors) and any(member.enemy_id for member in survivors):
+        boss_type = "chimera" if session.enemy_id == "chimera" else "dummy"
+        if any(not member.enemy_id for member in survivors) and any(member.enemy_id == boss_type for member in survivors):
             return False
     elif len(survivors) > 1:
         return False
@@ -1555,14 +1596,32 @@ def advance_combat_turn(session: CombatSession) -> None:
     if not session.participants:
         session.turn_index = 0
         return
-    for enemy in session.participants:
-        if enemy.pounce_target is not None and not combat_is_active(session.participants[enemy.pounce_target]):
-            enemy.pounce_target = None
-    for _ in range(len(session.participants)):
-        session.turn_index += 1
-        if session.turn_index >= len(session.participants):
-            session.turn_index = 0
+    order = session.turn_order or list(range(len(session.participants)))
+    position = order.index(session.turn_index)
+    for _ in range(len(session.participants) * 2):
+        position += 1
+        if position >= len(order):
+            if session.round_limit and session.round_number >= session.round_limit:
+                session.raid_timed_out = True
+                for member in session.participants:
+                    if not member.enemy_id:
+                        member.hp = 0
+                        member.cover_active = False
+                        record_combat_elimination(session, member)
+                session.recent_logs.append("【제한 시간 초과 · 전멸】 실험구역이 봉쇄됐어요.")
+                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+                return
             session.round_number += 1
+            if session.round_limit and session.round_number in CHIMERA_ROUND_WARNINGS:
+                session.recent_logs.append("【실험구역 경고】 " + CHIMERA_ROUND_WARNINGS[session.round_number])
+                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            # Appended reinforcements enter initiative next round. Existing
+            # participant indexes stay stable for distances and status sources.
+            if session.turn_order:
+                order = sorted(range(len(session.participants)), key=lambda i: -session.participants[i].dexterity)
+                session.turn_order = order
+            position = 0
+        session.turn_index = order[position]
         if combat_is_active(session.participants[session.turn_index]):
             session.turn_serial += 1
             session.participants[session.turn_index].cover_active = False
@@ -1600,6 +1659,11 @@ async def refresh_combat_turn_weapons(session: CombatSession) -> None:
 
 
 async def repost_combat_turn(session: CombatSession) -> None:
+    if session.raid_timed_out:
+        await finish_combat_if_decided(session)
+        return
+    if await trigger_round_raid_attack(session):
+        return
     # A stationary dummy has no player controls. Its turn still ticks ongoing
     # damage and escape checks before moving on, using the same round clock.
     while True:
@@ -1608,7 +1672,7 @@ async def repost_combat_turn(session: CombatSession) -> None:
         current = session.participants[session.turn_index]
         if not current.enemy_id:
             break
-        if current.enemy_id == "chimera":
+        if current.enemy_id in {"chimera", "minion"}:
             await publish_combat_panel(session, None)
             await take_chimera_turn(session)
             return
@@ -1657,7 +1721,7 @@ async def show_raid_event(session: CombatSession, text: str) -> None:
 
 
 async def begin_raid_attack(session: CombatSession, enemy_index: int, target_index: int, weapon_index: int,
-                            *, resume_turn_index: int | None = None, modifier: int = 0) -> None:
+                            *, modifier: int = 0, resume_turn_index: int | None = None) -> None:
     enemy = session.participants[enemy_index]
     weapon = enemy.weapons[weapon_index]
     session.turn_index = enemy_index
@@ -1672,39 +1736,97 @@ async def begin_raid_attack(session: CombatSession, enemy_index: int, target_ind
     await CombatView(session).process_pending_attack()
 
 
-async def take_chimera_turn(session: CombatSession) -> None:
+async def trigger_round_raid_attack(session: CombatSession) -> bool:
+    for enemy_index, enemy in enumerate(session.participants):
+        target_index = enemy.round_attack_target
+        if target_index is None or session.round_number < enemy.round_attack_due:
+            continue
+        enemy.round_attack_target = None
+        if not combat_is_active(enemy) or not combat_is_active(session.participants[target_index]):
+            continue
+        if combat_is_shocked(session, enemy) or maintaining_combat_shock(session, enemy):
+            await show_raid_event(session, "【예고 공격 취소】 키메라가 충격에 묶여 도약하지 못했어요.")
+            continue
+        order = ["근거리", "보통거리", "먼 거리"]
+        distance = combat_distance(session, enemy_index, target_index)
+        modifier = -1 if order.index(distance) > order.index(enemy.round_attack_distance) else 0
+        resume = session.turn_index
+        await publish_combat_panel(session, None)
+        await show_raid_event(session, f"【예고 공격 발동】 {session.round_number}라운드 · {session.participants[target_index].character_name}에게 폭주 도약!"
+                              + (" · 거리 벌리기 패널티 +1" if modifier else ""))
+        session.distances[tuple(sorted((enemy_index, target_index)))] = "근거리"
+        await begin_raid_attack(session, enemy_index, target_index, 1, modifier=modifier, resume_turn_index=resume)
+        return True
+    return False
+
+
+async def summon_raid_minion(session: CombatSession, summoner: CombatParticipant) -> None:
+    summoner.summons_used += 1
+    minion = make_raid_enemy("minion")
+    minion.character_name = f"실험체 {summoner.summons_used}"
+    spec = RAID_ENEMIES["minion"]
+    minion.dexterity, minion.constitution = spec["dex"], spec["con"]
+    minion.strength, minion.size = spec["str"], spec["size"]
+    minion.hp = minion.max_hp = 6
+    minion.spawn_round = session.round_number + 1
+    minion.weapons = await combat_weapons(minion)
+    # Freeze this round's order before appending the reinforcement.
+    if not session.turn_order:
+        session.turn_order = list(range(len(session.participants)))
+    session.participants.append(minion)
+    await show_raid_event(session,
+        f"【실험체 소환】 {minion.character_name} · HP 6 · 민첩 35 · 근접전 35 · 피해 1d3\n"
+        f"다음 라운드부터 행동 · 소환 {summoner.summons_used}/2")
+
+
+async def take_chimera_turn(session: CombatSession, *, continuation: bool = False) -> None:
     enemy_index = session.turn_index
     enemy = session.participants[enemy_index]
-    enemy.recovering = False
+    if not continuation:
+        enemy.recovering = False
+        enemy.actions_left = random.randint(1, 3) if enemy.enemy_id == "chimera" else 1
+        if enemy.enemy_id == "chimera":
+            await show_raid_event(session, f"행동 주사위 1d3 [{enemy.actions_left}]\n【연속 행동】 이번 턴 {enemy.actions_left}회")
     shock = next((effect for effect in active_combat_statuses(session, enemy) if "충격" in effect.spec.kinds), None)
     if shock is not None:
+        enemy.actions_left = 0
         await attempt_combat_status_escape(session, enemy, shock)
-        await CombatView(session).complete_attack_turn("키메라가 충격에서 벗어나려고 몸부림쳤어요.")
+        await CombatView(session).complete_attack_turn("실험체가 충격에서 벗어나려고 몸부림쳤어요.")
         return
     if maintaining_combat_shock(session, enemy):
+        enemy.actions_left = 0
         await CombatView(session).complete_attack_turn("키메라가 충격을 유지하고 있어요.")
         return
     targets = combat_targets(session)
     if not targets:
         await finish_combat_if_decided(session)
         return
-    if enemy.hp * 2 <= enemy.max_hp and not enemy.regeneration_used:
+    if enemy.enemy_id == "chimera" and enemy.hp * 2 <= enemy.max_hp and not enemy.regeneration_used:
         enemy.regeneration_used = True
         enemy.recovering = True
         healing = random.randint(1, 6)
         previous_hp = enemy.hp
         enemy.hp = min(enemy.max_hp, enemy.hp + healing)
-        await show_raid_event(session, f"재생 주사위 1d6 [{healing}]\n【불안정한 재생】 HP {previous_hp} → {enemy.hp} · 다음 차례까지 반격 불가")
-        await CombatView(session).complete_attack_turn("키메라가 공격 대신 상처를 재생했어요!")
-        return
-    step = enemy.pattern_step
-    enemy.pattern_step = (step + 1) % (4 if enemy.enemy_special else 3)
+        await show_raid_event(session, f"재생 주사위 1d6 [{healing}]\n【불안정한 재생】 HP {previous_hp} → {enemy.hp} · 행동 소모 없음")
+    step = enemy.pattern_step if enemy.enemy_id == "chimera" else 0
+    if enemy.enemy_id == "chimera":
+        enemy.pattern_step = (step + 1) % 6
+    if step == 5 and enemy.round_attack_target is None:
+        enemy.round_attack_target = random.choice(targets)
+        enemy.round_attack_due = session.round_number + 1
+        enemy.round_attack_distance = combat_distance(session, enemy_index, enemy.round_attack_target)
+        await show_raid_event(session,
+            f"【폭주 도약 예고】 {with_particle(session.participants[enemy.round_attack_target].character_name, '를', '을')} 노리고 있어요!\n"
+            f"{enemy.round_attack_due}라운드 시작에 공격 · 지금 행동은 계속 진행")
     if step == 2:
-        enemy.pounce_target = random.choice(targets)
-        enemy.pounce_dodged = False
-        target = session.participants[enemy.pounce_target]
-        await show_raid_event(session, f"【도약 준비】 키메라가 몸을 낮추고 {with_particle(target.character_name, '를', '을')} 노려봐요!\n대상의 다음 차례가 끝나면 덮치기 · 거리를 넓히면 공격 패널티 +1")
-        await CombatView(session).complete_attack_turn("키메라가 도약을 준비하고 있어요!")
+        target_index = random.choice(targets)
+        session.distances[tuple(sorted((enemy_index, target_index)))] = "근거리"
+        await show_raid_event(session, f"【도약 공격】 키메라가 {session.participants[target_index].character_name}에게 바로 덮쳐요!")
+        await begin_raid_attack(session, enemy_index, target_index, 1)
+        return
+    if step == 4 and enemy.summons_used < 2:
+        await summon_raid_minion(session, enemy)
+        await CombatView(session).complete_attack_turn("키메라가 실험체를 불러냈어요!")
         return
     weapon_index = 2 if step == 3 and enemy.enemy_special else 0
     if weapon_index == 2:
@@ -1724,31 +1846,11 @@ async def take_chimera_turn(session: CombatSession) -> None:
         success = coc_combat_check_result(roll, enemy.dexterity) not in {"실패", "대실패"}
         await show_raid_event(session,
             f"민첩 주사위 {combat_roll_text(enemy, roll, rolls, modifier, session=session)} / 기준 {enemy.dexterity}\n"
-            f"【접근 {'성공' if success else '실패'}】 키메라 → {session.participants[target_index].character_name} · {distance}")
+            f"【접근 {'성공' if success else '실패'}】 {enemy.character_name} → {session.participants[target_index].character_name} · {distance}")
         if not success or distance != "근거리":
-            await CombatView(session).complete_attack_turn("키메라가 다가왔지만 공격하지 못했어요.")
+            await CombatView(session).complete_attack_turn("실험체가 다가왔지만 공격하지 못했어요.")
             return
     await begin_raid_attack(session, enemy_index, target_index, weapon_index)
-
-
-async def trigger_raid_pounce(session: CombatSession) -> bool:
-    origin = session.turn_index
-    for enemy_index, enemy in enumerate(session.participants):
-        if enemy.enemy_id != "chimera" or enemy.pounce_target != origin:
-            continue
-        enemy.pounce_target = None
-        if not combat_is_active(enemy) or not combat_is_active(session.participants[origin]):
-            continue
-        if combat_is_shocked(session, enemy) or maintaining_combat_shock(session, enemy):
-            await show_raid_event(session, "【도약 취소】 키메라가 충격에 묶여 덮치지 못했어요.")
-            continue
-        modifier = -1 if enemy.pounce_dodged else 0
-        session.distances[tuple(sorted((enemy_index, origin)))] = "근거리"
-        await show_raid_event(session, f"【덮치기】 키메라가 {session.participants[origin].character_name}에게 도약해요!"
-                              + (" · 거리 벌리기 패널티 +1" if modifier else ""))
-        await begin_raid_attack(session, enemy_index, origin, 1, resume_turn_index=origin, modifier=modifier)
-        return True
-    return False
 
 
 def roll_damage_formula(formula: str) -> tuple[int, str]:
@@ -1872,12 +1974,22 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
 def apply_combat_weapon_statuses(session: CombatSession, attacker: CombatParticipant, target: CombatParticipant, weapon: CombatWeapon) -> None:
     source_index = next(index for index, member in enumerate(session.participants) if member is attacker)
     for spec in weapon.effects:
+        retrievable = "충격" in spec.kinds
+        if target.enemy_id == "chimera" and "충격" in spec.kinds:
+            session.recent_logs.append(f"【충격 면역】 {target.character_name}의 행동을 막을 수 없어요.")
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            session.last_attack_events.append(f"{target.character_name}: 충격 면역.")
+            remaining = tuple(kind for kind in spec.kinds if kind != "충격")
+            if not remaining:
+                continue
+            spec = replace(spec, kinds=remaining)
         if "충격" in spec.kinds and not combat_is_active(attacker):
             continue
         target.status_effects = [effect for effect in active_combat_statuses(session, target)
                                  if not (effect.source_index == source_index and effect.weapon.name == weapon.name
                                          and set(effect.spec.kinds) == set(spec.kinds) and effect.spec.escape_skill == spec.escape_skill)]
-        target.status_effects.append(CombatStatusEffect(source_index, replace(weapon), spec, attacker.strength, attacker.size))
+        target.status_effects.append(CombatStatusEffect(source_index, replace(weapon), spec, attacker.strength, attacker.size,
+                                                       retrievable=retrievable))
         label = "·".join(spec.kinds)
         session.recent_logs.append(f"【{label} 부여】 {target.character_name} · 해제 판정: {spec.escape_skill}")
         session.last_attack_events.append(f"{target.character_name}에게 {label} 부여! 해제 판정: {spec.escape_skill}.")
@@ -1921,6 +2033,8 @@ async def resolve_automatic_combat_status_checks(session: CombatSession, member:
 
 
 async def prepare_combat_status_turn(session: CombatSession) -> bool:
+    if session.raid_timed_out:
+        return await finish_combat_if_decided(session)
     for _ in range(len(session.participants)):
         member = session.participants[session.turn_index]
         member.status_effects = active_combat_statuses(session, member)
@@ -2065,6 +2179,7 @@ class CombatLobbyView(discord.ui.View):
                     member.damage_dealt = 0
                     member.damage_received = 0
                 session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
+                session.turn_order = list(range(len(session.participants)))
                 for member in session.participants:
                     if member.enemy_id == "chimera":
                         session.recent_logs.append(
@@ -2293,6 +2408,14 @@ class CombatView(CombatActionView):
             self.add_item(discord.ui.Button(label="근접전은 근거리에서 가능해요", style=discord.ButtonStyle.secondary, disabled=True))
         else:
             self.add_item(discord.ui.Button(label="시트에서 무기를 찾지 못했어요", style=discord.ButtonStyle.secondary, disabled=True))
+        bindings = releasable_combat_statuses(session, current)
+        if bindings:
+            release = discord.ui.Button(
+                label="무기회수",
+                style=discord.ButtonStyle.secondary, row=1,
+            )
+            release.callback = self.release_bindings
+            self.add_item(release)
         close_button = discord.ui.Button(label="거리 좁히기", style=discord.ButtonStyle.primary, row=2, disabled=current.movement_choice == "cover" or not any(combat_distance(session, session.turn_index, i) != "근거리" for i in combat_targets(session)))
         close_button.callback = self.close_distance
         self.add_item(close_button)
@@ -2307,6 +2430,31 @@ class CombatView(CombatActionView):
         )
         cover_button.callback = self.take_cover
         self.add_item(cover_button)
+
+    async def release_bindings(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        await interaction.response.defer()
+        async with session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            current = session.participants[session.turn_index]
+            if interaction.user.id != current.user_id:
+                await interaction.followup.send("현재 차례인 캐릭터만 회수할 수 있어요.", ephemeral=True)
+                return
+            if combat_is_shocked(session, current) or pending_combat_status_check(session, current) or session.pending_attack is not None:
+                await interaction.followup.send("자기 행동 차례에 상태 판정을 마친 뒤 회수해 주세요.", ephemeral=True)
+                return
+            bindings = releasable_combat_statuses(session, current)
+            if not bindings:
+                await interaction.followup.send("회수하거나 해제할 구속이 없어요.", ephemeral=True)
+                return
+            names = list(dict.fromkeys(target.character_name for target, _effect in bindings))
+            for target, effect in bindings:
+                target.status_effects.remove(effect)
+            session.recent_logs.append(f"【무기회수 · 구속 해제】 {current.character_name} → {', '.join(names)} · 충격·지속 효과 해제")
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            session.briefing = f"구속을 해제했어요. 아직 {current.character_name}의 턴이에요!"
+            await session.message.edit(content=render_combat_session(session), view=CombatView(session))
 
     async def allow_normal_action(self, interaction: discord.Interaction) -> bool:
         member = self.session.participants[self.session.turn_index]
@@ -2447,8 +2595,6 @@ class CombatView(CombatActionView):
             succeeded = roll <= current.dexterity
             distance = distance_order[new_index]
             session.distances[tuple(sorted((session.turn_index, target_index)))] = distance
-            if direction > 0 and target.pounce_target == session.turn_index:
-                target.pounce_dodged = True
             outcome = "성공" if succeeded else "실패"
             movement_result = "추가 행동 가능" if succeeded else "턴 종료"
             log = (
@@ -2757,14 +2903,22 @@ class CombatView(CombatActionView):
     async def complete_attack_turn(self, summary: str = "공격이 끝났어요.") -> None:
         session = self.session
         attack = session.pending_attack
-        resumed = attack is not None and attack.resume_turn_index is not None
-        if resumed:
-            session.turn_index = attack.resume_turn_index
+        resume = attack.resume_turn_index if attack is not None else None
         session.pending_attack = None
+        if resume is not None:
+            session.turn_index = resume
         if await finish_combat_if_decided(session):
             return
-        if not resumed and await trigger_raid_pounce(session):
+        if resume is not None:
+            session.briefing = f"예고 공격이 끝났어요. {session.participants[resume].character_name}의 턴이에요!"
+            await repost_combat_turn(session)
             return
+        current = session.participants[session.turn_index]
+        if current.enemy_id in {"chimera", "minion"}:
+            current.actions_left = max(0, current.actions_left - 1)
+            if current.actions_left and combat_is_active(current):
+                await take_chimera_turn(session, continuation=True)
+                return
         advance_combat_turn(session)
         next_turn = session.participants[session.turn_index]
         session.briefing = f"{summary} 이제 {next_turn.character_name}의 턴이에요!"
@@ -3096,6 +3250,7 @@ async def start_combat(interaction: discord.Interaction, mode: str = "대련", e
         participants=[make_raid_enemy(enemy_id)] if mode == "레이드" else [],
         mode=mode,
         enemy_id=enemy_id,
+        round_limit=10 if enemy_id == "chimera" else 0,
     )
     combat_sessions[channel_id] = session
     await interaction.response.send_message(render_combat_session(session), view=CombatLobbyView(session))

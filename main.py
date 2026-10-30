@@ -225,6 +225,8 @@ class CombatWeapon:
     ammo_capacity: int | None = None
     knockback: bool = False
     snaring: bool = False
+    magic_ammo: bool = False
+    reload_count: int = 0
 
     def __post_init__(self) -> None:
         if self.ammo_capacity is None and self.ammo is not None:
@@ -251,6 +253,7 @@ class CachedSkillData:
     occupation: str | None
     expires_at: float
     weapons: list[CombatWeapon] = field(default_factory=list)
+    magic_points: int | None = None
 
 
 class SheetRegistry:
@@ -436,6 +439,10 @@ class SheetRegistry:
             raise SheetError("무기 목록을 읽을 캐릭터 시트를 찾지 못했어요.")
         return [replace(weapon, broken=False) for weapon in data.weapons] if data else []
 
+    async def get_combat_magic_points(self, character_value: str) -> int | None:
+        data = await self._get_skill_data(character_value)
+        return data.magic_points if data else None
+
     async def get_character_emote_name(self, character_value: str, succeeded: bool) -> str | None:
         data = await self._get_skill_data(character_value)
         if not data or not data.emote_key:
@@ -485,7 +492,8 @@ class SheetRegistry:
             emote_key = self._parse_emote_key(value_ranges)
             occupation = self._parse_occupation(value_ranges)
             weapons = self._parse_combat_weapons(value_ranges, use_sorted_table)
-            cached = CachedSkillData(values, invested_points, emote_key, occupation, time.monotonic() + 60, weapons)
+            cached = CachedSkillData(values, invested_points, emote_key, occupation, time.monotonic() + 60, weapons,
+                                     magic_points=self._parse_current_magic_points(value_ranges))
             self._skill_cache[cache_key] = cached
             return cached
 
@@ -624,6 +632,27 @@ class SheetRegistry:
         return result
 
     @classmethod
+    def _parse_current_magic_points(cls, value_ranges: list[dict[str, Any]]) -> int | None:
+        rows = cls._range_rows(value_ranges, 0)
+        for row_index, row in enumerate(rows):
+            for column, label in enumerate(row):
+                if not (label.strip().startswith("마력") or label.strip().casefold() == "mp"):
+                    continue
+                current_column = next((i for i in range(column + 1, len(row)) if row[i].strip() == "현재"), None)
+                if current_column is not None:
+                    for following in rows[row_index + 1:row_index + 3]:
+                        value = parse_int(following[current_column]) if current_column < len(following) else None
+                        if value is not None:
+                            return max(0, value)
+                    return None
+                # Some sheets place the current value directly beside the label.
+                for cell in row[column + 1:column + 4]:
+                    value = parse_int(cell)
+                    if value is not None:
+                        return max(0, value)
+        return None
+
+    @classmethod
     def _parse_combat_weapons(cls, value_ranges: list[dict[str, Any]], use_sorted_table: bool) -> list[CombatWeapon]:
         range_index = 3 if use_sorted_table else 5
         rows = cls._range_rows(value_ranges, range_index)
@@ -685,6 +714,7 @@ class SheetRegistry:
                 ammo=ammo,
                 malfunction=malfunction,
                 effects=effects,
+                magic_ammo=bool(re.search(r"[（(]\s*마력\s*[）)]", ammo_text)),
             ))
         return weapons
 
@@ -1096,7 +1126,7 @@ class CombatParticipant:
     max_hp: int = 0
     is_pulp: bool = False
     weapons: list[CombatWeapon] = field(default_factory=list)
-    weapon_states: dict[tuple[str, str, int], tuple[int | None, bool, int | None]] = field(default_factory=dict)
+    weapon_states: dict[tuple[str, str, int], tuple[int | None, bool, int | None, int]] = field(default_factory=dict)
     defended_round: int = 0
     cover_active: bool = False
     movement_choice: str = ""
@@ -1124,6 +1154,7 @@ class CombatParticipant:
     snared: bool = False
     hunt_target: int | None = None
     hunt_attacks_left: int = 0
+    magic_points: int | None = None
 
 
 @dataclass
@@ -1364,6 +1395,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             (f"{member.character_name}(누적 피해 {member.damage_received} · HP 없음)" if member.enemy_id == "dummy" else
             f"{member.character_name}(민첩 {member.dexterity} · HP {member.hp}/{member.max_hp}"
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
+            f"{' · 마력 ' + str(member.magic_points) if member.magic_points is not None else ''}"
             f"{' · 충격 면역' if member.enemy_id == 'chimera' else ''}"
             f"{' · 남은 행동 ' + str(member.actions_left) + '회' if member.enemy_id == 'chimera' and member is session.participants[session.turn_index] and member.actions_left else ''}"
             f"{' · ' + str(member.spawn_round) + '라운드부터 행동' if member.spawn_round > session.round_number else ''}"
@@ -1661,10 +1693,10 @@ def merge_combat_weapons(member: CombatParticipant, incoming: list[CombatWeapon]
 
     states = dict(member.weapon_states)
     for key, weapon in keyed(member.weapons):
-        states[key] = (weapon.ammo, weapon.broken, weapon.ammo_capacity)
+        states[key] = (weapon.ammo, weapon.broken, weapon.ammo_capacity, weapon.reload_count)
     for key, weapon in keyed(incoming):
         if key in states:
-            ammo, broken, capacity = states[key]
+            ammo, broken, capacity, reload_count = states[key]
             # Unknown ammo has never been spent. Recover it from a successful
             # sheet read, while preserving a real zero from depleted weapons.
             if ammo is not None or weapon.ammo is None:
@@ -1672,7 +1704,8 @@ def merge_combat_weapons(member: CombatParticipant, incoming: list[CombatWeapon]
                 if capacity is not None:
                     weapon.ammo_capacity = capacity
             weapon.broken = broken
-        states[key] = (weapon.ammo, weapon.broken, weapon.ammo_capacity)
+            weapon.reload_count = reload_count
+        states[key] = (weapon.ammo, weapon.broken, weapon.ammo_capacity, weapon.reload_count)
     member.weapons = incoming
     member.weapon_states = states
 
@@ -2215,6 +2248,13 @@ class CombatLobbyView(discord.ui.View):
                     return dexterity, strength, constitution, size, weapons
 
                 combat_data = await asyncio.gather(*(load_combat_data(member) for member in session.participants))
+                magic_users = [member for member, data in zip(session.participants, combat_data)
+                               if not member.enemy_id and any(weapon.magic_ammo for weapon in data[4])]
+                magic_values = await asyncio.gather(*(registry.get_combat_magic_points(member.character_value) for member in magic_users))
+                if any(value is None for value in magic_values):
+                    await interaction.followup.send("마력 충전 무기를 가진 캐릭터의 현재 마력을 읽지 못했어요. 시트의 마력 현재값을 확인한 뒤 다시 시작해 주세요.", ephemeral=True)
+                    return
+                magic_by_member = {id(member): value for member, value in zip(magic_users, magic_values)}
                 missing_health = [
                     member.character_name for member, (_dexterity, strength, constitution, size, _weapons) in zip(session.participants, combat_data)
                     if strength is None or constitution is None or size is None
@@ -2235,6 +2275,7 @@ class CombatLobbyView(discord.ui.View):
                         member.max_hp = 0
                     member.hp = member.max_hp
                     member.weapons = weapons
+                    member.magic_points = magic_by_member.get(id(member))
                     member.defended_round = 0
                     member.cover_active = False
                     member.movement_choice = ""
@@ -2712,11 +2753,16 @@ class CombatView(CombatActionView):
                 await interaction.response.send_message(f"`{weapon.name}`의 탄약이 없어요.", ephemeral=True)
                 return
             if is_projectile_weapon(weapon):
+                reload_hint = (
+                    f"발수 선택 또는 즉시 마력충전 · 마력 {current.magic_points if current.magic_points is not None else '?'} · 마력 1당 1발"
+                    if weapon.magic_ammo else
+                    f"발수 선택 또는 재장전 (턴 종료) · 남은 재장전 {max(0, 3 - weapon.reload_count)}회"
+                )
                 await interaction.response.edit_message(
                     content=render_combat_session(
                         session,
                         f"선택 무기: {weapon.name}\n남은 탄약: {weapon.ammo}발\n"
-                        + ("발수 선택 또는 재장전 (재장전하면 턴 종료)" if is_firearm_weapon(weapon) else "연사 발수 선택"),
+                        + (reload_hint if is_firearm_weapon(weapon) else "연사 발수 선택"),
                     ),
                     view=CombatShotCountView(session, weapon_index),
                 )
@@ -3079,14 +3125,18 @@ class CombatShotCountView(CombatActionView):
     def __init__(self, session: CombatSession, weapon_index: int) -> None:
         super().__init__(session, back=True)
         self.weapon_index = weapon_index
-        weapon = session.participants[session.turn_index].weapons[weapon_index]
+        current = session.participants[session.turn_index]
+        weapon = current.weapons[weapon_index]
         if weapon.ammo is not None and weapon.ammo > 0:
             self.add_item(CombatShotCountSelect(session, weapon_index))
         if is_firearm_weapon(weapon):
             capacity = weapon.ammo_capacity or 0
+            label = ("마력충전 · 1마력당 1발 (즉시)" if weapon.magic_ammo else
+                     f"재장전 · 남은 {max(0, 3 - weapon.reload_count)}회 (턴 종료)")
+            unavailable = (current.magic_points == 0 if weapon.magic_ammo else weapon.reload_count >= 3)
             reload_button = discord.ui.Button(
-                label=f"재장전 · {capacity}발로 채우기 (턴 종료)", style=discord.ButtonStyle.primary,
-                disabled=weapon.broken or capacity <= 0 or weapon.ammo == capacity,
+                label=label, style=discord.ButtonStyle.primary,
+                disabled=weapon.broken or capacity <= 0 or (weapon.ammo or 0) >= capacity or unavailable,
             )
             reload_button.callback = self.reload_weapon
             self.add_item(reload_button)
@@ -3112,13 +3162,41 @@ class CombatShotCountView(CombatActionView):
                 return
             weapon = current.weapons[self.weapon_index]
             capacity = weapon.ammo_capacity or 0
-            if not is_firearm_weapon(weapon) or weapon.broken or capacity <= 0 or weapon.ammo == capacity:
+            if not is_firearm_weapon(weapon) or weapon.broken or capacity <= 0 or (weapon.ammo or 0) >= capacity:
                 await interaction.followup.send("현재 재장전할 수 없는 무기예요.", ephemeral=True)
                 return
             previous_ammo = weapon.ammo or 0
+            if weapon.magic_ammo:
+                if current.magic_points is None:
+                    try:
+                        current.magic_points = await registry.get_combat_magic_points(current.character_value)
+                    except Exception as exc:
+                        print(f"Combat magic read failed ({type(exc).__name__}).")
+                    if current.magic_points is None:
+                        await interaction.followup.send("현재 마력을 읽지 못했어요. 마력을 소모하지 않았으니 시트를 확인한 뒤 다시 눌러 주세요.", ephemeral=True)
+                        return
+                charge = min(capacity - previous_ammo, current.magic_points)
+                if charge <= 0:
+                    await interaction.followup.send("충전에 사용할 마력이 없어요.", ephemeral=True)
+                    return
+                previous_magic = current.magic_points
+                current.magic_points -= charge
+                weapon.ammo = previous_ammo + charge
+                session.recent_logs.append(
+                    f"【즉시 마력충전】 {current.character_name} · {weapon.name} · 탄약 {previous_ammo} → {weapon.ammo}\n"
+                    f"마력 {previous_magic} → {current.magic_points} · 턴 소모 없음"
+                )
+                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+                session.briefing = f"마력으로 탄환 {charge}발을 충전했어요. 아직 {current.character_name}의 턴이에요!"
+                await session.message.edit(content=render_combat_session(session), view=CombatShotCountView(session, self.weapon_index))
+                return
+            if weapon.reload_count >= 3:
+                await interaction.followup.send("이 무기는 이번 전투에서 재장전 3회를 모두 사용했어요.", ephemeral=True)
+                return
             weapon.ammo = capacity
+            weapon.reload_count += 1
             session.recent_logs.append(
-                f"【재장전 · 턴 종료】 {current.character_name} · {weapon.name} · 탄약 {previous_ammo} → {capacity}"
+                f"【재장전 · 턴 종료】 {current.character_name} · {weapon.name} · 탄약 {previous_ammo} → {capacity} · 재장전 {weapon.reload_count}/3"
             )
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await CombatView(session).complete_attack_turn(f"{with_particle(current.character_name, '가', '이')} {with_particle(weapon.name, '를', '을')} 재장전했어요.")

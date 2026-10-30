@@ -704,6 +704,8 @@ class SheetRegistry:
             damage, effects = parse_combat_statuses(damage)
             ammo_text = cell(row, ammo_index)
             ammo = first_number(ammo_text)
+            if not ammo_text and "사격" in skill_reference.casefold():
+                ammo = 6
             malfunction = first_number(cell(row, malfunction_index))
             weapons.append(CombatWeapon(
                 name=name,

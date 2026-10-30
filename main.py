@@ -1114,6 +1114,7 @@ class CombatParticipant:
     recovering: bool = False
     enemy_special: str = ""
     actions_left: int = 0
+    action_dice_sides: int = 3
     summons_used: int = 0
     round_attack_due: int = 0
     round_attack_target: int | None = None
@@ -1217,6 +1218,7 @@ def randomize_raid_enemy(member: CombatParticipant, player_count: int) -> None:
     member.regeneration_used = False
     member.recovering = False
     member.actions_left = 0
+    member.action_dice_sides = 2 if player_count <= 2 else 3
     member.summons_used = 0
     member.round_attack_due = 0
     member.round_attack_target = None
@@ -1823,9 +1825,9 @@ async def take_chimera_turn(session: CombatSession, *, continuation: bool = Fals
             enemy.armor_boosted = False
             enemy.armor = 1
             await show_raid_event(session, "【장갑 탈락】 굳었던 생체 장갑이 벗겨져요. 장갑 1로 돌아왔어요.")
-        enemy.actions_left = random.randint(1, 3) if enemy.enemy_id == "chimera" else 1
+        enemy.actions_left = random.randint(1, enemy.action_dice_sides) if enemy.enemy_id == "chimera" else 1
         if enemy.enemy_id == "chimera":
-            await show_raid_event(session, f"행동 주사위 1d3 [{enemy.actions_left}]\n【연속 행동】 이번 턴 {enemy.actions_left}회")
+            await show_raid_event(session, f"행동 주사위 1d{enemy.action_dice_sides} [{enemy.actions_left}]\n【연속 행동】 이번 턴 {enemy.actions_left}회")
     shock = next((effect for effect in active_combat_statuses(session, enemy) if "충격" in effect.spec.kinds), None)
     if shock is not None:
         enemy.actions_left = 0
@@ -2240,7 +2242,7 @@ class CombatLobbyView(discord.ui.View):
                         session.recent_logs.append(
                             f"【실험체 생성】 HP {member.max_hp} · 장갑 {member.armor} · 민첩 {member.dexterity} · "
                             f"근접전 {member.enemy_skills['fight']} · 회피 {member.enemy_skills['dodge']}\n"
-                            f"습득한 특수기: {CHIMERA_SPECIALS[member.enemy_special]}"
+                            f"습득한 특수기: {CHIMERA_SPECIALS[member.enemy_special]} · 매 턴 행동 1d{member.action_dice_sides}회"
                         )
                 session.phase = "combat"
                 session.round_number = 1

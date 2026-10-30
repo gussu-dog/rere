@@ -1664,7 +1664,15 @@ def merge_combat_weapons(member: CombatParticipant, incoming: list[CombatWeapon]
         states[key] = (weapon.ammo, weapon.broken, weapon.ammo_capacity)
     for key, weapon in keyed(incoming):
         if key in states:
-            weapon.ammo, weapon.broken, weapon.ammo_capacity = states[key]
+            ammo, broken, capacity = states[key]
+            # Unknown ammo has never been spent. Recover it from a successful
+            # sheet read, while preserving a real zero from depleted weapons.
+            if ammo is not None or weapon.ammo is None:
+                weapon.ammo = ammo
+                if capacity is not None:
+                    weapon.ammo_capacity = capacity
+            weapon.broken = broken
+        states[key] = (weapon.ammo, weapon.broken, weapon.ammo_capacity)
     member.weapons = incoming
     member.weapon_states = states
 

@@ -1151,7 +1151,7 @@ class CombatParticipant:
     summons_used: int = 0
     round_attack_due: int = 0
     round_attack_target: int | None = None
-    round_attack_distance: int = 3
+    round_attack_distance: int = 2
     spawn_round: int = 0
     armor_boosted: bool = False
     snared: bool = False
@@ -1404,7 +1404,7 @@ def combat_roll_text(member: CombatParticipant, roll: int, rolls: list[int], mod
 
 def combat_distance(session: CombatSession, first: int, second: int) -> str:
     gap = abs(session.participants[first].position - session.participants[second].position)
-    return "근거리" if gap <= 1 else "보통거리" if gap <= 3 else "먼 거리"
+    return "근거리" if gap <= 1 else "보통거리" if gap == 2 else "먼 거리"
 
 
 def move_combat_position(session: CombatSession, mover: int, target: int, direction: int, *, adjacent: bool = False) -> None:
@@ -1421,11 +1421,11 @@ def initialize_combat_field(session: CombatSession) -> None:
     player_number = 0
     for member in session.participants:
         if member.enemy_id:
-            member.position = 3
+            member.position = 2
             member.field_symbol = "◎" if member.enemy_id != "minion" else "ⓐ"
         else:
             member.field_symbol = chr(ord("①") + player_number)
-            member.position = 0 if session.mode == "레이드" else (player_number % 2) * 3
+            member.position = 0 if session.mode == "레이드" else (player_number % 2) * 2
             player_number += 1
 
 

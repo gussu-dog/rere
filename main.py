@@ -1407,7 +1407,8 @@ def combat_roll_text(member: CombatParticipant, roll: int, rolls: list[int], mod
 
 def combat_distance(session: CombatSession, first: int, second: int) -> str:
     gap = abs(session.participants[first].position - session.participants[second].position)
-    return "근거리" if gap <= 1 else "보통거리" if gap == 2 else "먼 거리"
+    close_gap = 1 if session.mode == "레이드" else 0
+    return "근거리" if gap <= close_gap else "보통거리" if gap == close_gap + 1 else "먼 거리"
 
 
 def move_combat_position(session: CombatSession, mover: int, target: int, direction: int, *, adjacent: bool = False) -> None:
@@ -1415,9 +1416,21 @@ def move_combat_position(session: CombatSession, mover: int, target: int, direct
     delta = other.position - member.position
     sign = 1 if delta >= 0 else -1
     if adjacent:
-        member.position = other.position - sign
+        close_gap = 1 if session.mode == "레이드" else 0
+        member.position = other.position - sign * close_gap
     else:
         member.position += sign * (-direction)
+    separate_combat_boss_position(session)
+
+
+def separate_combat_boss_position(session: CombatSession) -> None:
+    if session.mode != "레이드":
+        return
+    boss_positions = {member.position for member in session.participants
+                      if member.enemy_id and member.enemy_id != "minion" and combat_is_active(member)}
+    for member in session.participants:
+        if not member.enemy_id and combat_is_active(member) and member.position in boss_positions:
+            member.position -= 1
 
 
 def initialize_combat_field(session: CombatSession) -> None:
@@ -1428,7 +1441,7 @@ def initialize_combat_field(session: CombatSession) -> None:
             member.field_symbol = "◎" if member.enemy_id != "minion" else "ⓐ"
         else:
             member.field_symbol = chr(ord("①") + player_number)
-            member.position = 0 if session.mode == "레이드" else (player_number % 2) * 2
+            member.position = 0 if session.mode == "레이드" else player_number % 2
             player_number += 1
 
 

@@ -1376,10 +1376,17 @@ def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: C
 
 def combat_roll_text(member: CombatParticipant, roll: int, rolls: list[int], modifier: int, *, session: CombatSession | None = None) -> str:
     mode = f" · 보너스 +{modifier}" if modifier > 0 else f" · 패널티 +{-modifier}" if modifier < 0 else ""
-    wound = " · 중상 패널티 +1" if member.major_wound else ""
-    hold = " · 충격 유지 패널티 +1" if maintaining_combat_shock(session, member) else ""
-    paralysis = f" · 마비 패널티 +{member.paralysis_stacks}" if member.paralyzed else ""
-    return f"1d100 [{', '.join(map(str, rolls))}] → 적용 {roll}{mode}{wound}{hold}{paralysis}"
+    selected = f" → {roll}" if len(rolls) > 1 else ""
+    reasons = []
+    if member.major_wound:
+        reasons.append("중상")
+    if maintaining_combat_shock(session, member):
+        reasons.append("충격 유지")
+    if member.paralyzed:
+        reasons.append(f"마비 {member.paralysis_stacks}")
+    source = f" ({', '.join(reasons)})" if reasons else ""
+    return f"1d100 [{', '.join(map(str, rolls))}]{selected}{mode}{source}"
+
 
 
 def combat_distance(session: CombatSession, first: int, second: int) -> str:
@@ -1941,17 +1948,17 @@ async def take_chimera_turn(session: CombatSession, *, continuation: bool = Fals
         healing = random.randint(1, 6)
         previous_hp = enemy.hp
         enemy.hp = min(enemy.max_hp, enemy.hp + healing)
-        await show_raid_event(session, f"재생 주사위 1d6 [{healing}]\n【불안정한 재생】 HP {previous_hp} → {enemy.hp} · 행동 소모 없음")
+        await show_raid_event(session, f"재생 주사위 1d6 [{healing}]\n【불안정한 재생】 HP {previous_hp} → {enemy.hp}")
     step = enemy.pattern_step if enemy.enemy_id == "chimera" else 0
     if enemy.enemy_id == "chimera":
         enemy.pattern_step = (step + 1) % 9
     if step == 6:
         enemy.armor_boosted = True
         enemy.armor = 3
-        await show_raid_event(session, "【생체 장갑 강화】 다음 자기 차례까지 장갑 3!\n한 번에 장갑 적용 전 피해 5 이상을 주면 강화 장갑 파괴 · 공격은 계속 진행")
+        await show_raid_event(session, "【장갑 강화】 장갑 3 · 다음 자기 턴까지 · 피해 5 이상으로 파괴")
     if step == 7:
         weapon_index = next(i for i, weapon in enumerate(enemy.weapons) if weapon.snaring)
-        await show_raid_event(session, "【끈적한 독액】 명중하면 대상의 다음 자기 차례가 끝날 때까지 이동 판정에 패널티 +1 · 회피 가능")
+        await show_raid_event(session, "【끈적한 독액】 명중 시 이동 패널티 +1 · 다음 자기 턴 종료까지")
         await begin_raid_attack(session, enemy_index, await choose_raid_target(session, enemy, targets), weapon_index)
         return
     if step == 8:
@@ -1993,7 +2000,7 @@ async def take_chimera_turn(session: CombatSession, *, continuation: bool = Fals
         enemy.movement_choice = "move"
         success = coc_combat_check_result(roll, enemy.dexterity) not in {"실패", "대실패"}
         await show_raid_event(session,
-            f"민첩 주사위 {combat_roll_text(enemy, roll, rolls, modifier, session=session)} / 기준 {enemy.dexterity}\n"
+            f"민첩 주사위 {combat_roll_text(enemy, roll, rolls, modifier, session=session)} / {enemy.dexterity}\n"
             f"【접근 {'성공' if success else '실패'}】 {enemy.character_name} → {session.participants[target_index].character_name} · {distance}")
         if not success or distance != "근거리":
             await CombatView(session).complete_attack_turn("실험체가 다가왔지만 공격하지 못했어요.")
@@ -2091,6 +2098,8 @@ def roll_weapon_damage(weapon: CombatWeapon, strength: int, size: int, critical:
     else:
         total = base_damage + bonus_damage
         detail = f"{base_detail} + DB {bonus_detail}"
+    if not bonus_formula or bonus_formula == "0":
+        detail = detail.rsplit(" + DB ", 1)[0]
     return max(0, total), detail
 
 
@@ -2113,7 +2122,7 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
     if succeeded and member.hp <= 0:
         status = "중상 · HP 0으로 전투 탈락"
     session.recent_logs.append(
-        f"건강 주사위 {dice_text} / 기준 {member.constitution}\n"
+        f"건강 주사위 {dice_text} / {member.constitution}\n"
         f"【건강 {'성공' if succeeded else '실패'} · {status}】 {member.character_name}"
     )
     session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -2172,7 +2181,7 @@ async def apply_combat_hit_effects(session: CombatSession, attacker: CombatParti
         resisted = result not in {"실패", "대실패"}
         outcome = f"【마비 저항 {'성공' if resisted else '실패'}】 {target.character_name}"
         session.recent_logs.append(
-            f"건강 주사위 {combat_roll_text(target, roll, rolls, modifier, session=session)} / 기준 {target.constitution}\n{outcome}"
+            f"건강 주사위 {combat_roll_text(target, roll, rolls, modifier, session=session)} / {target.constitution}\n{outcome}"
         )
         session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
         session.last_attack_events.append(outcome)
@@ -2228,7 +2237,7 @@ async def attempt_combat_status_escape(session: CombatSession, member: CombatPar
         member.status_effects.remove(effect)
     label = "·".join(effect.spec.kinds)
     session.recent_logs.append(
-        f"{skill} 주사위 {combat_roll_text(member, roll, rolls, modifier, session=session)} / 기준 {value}\n"
+        f"{skill} 주사위 {combat_roll_text(member, roll, rolls, modifier, session=session)} / {value}\n"
         f"【{label} 해제 {'성공' if succeeded else '실패'}】 {member.character_name}"
     )
     session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -2757,10 +2766,10 @@ class CombatView(CombatActionView):
             current.cover_active = result not in {"실패", "대실패"}
             current.movement_choice = "cover"
             outcome = "성공" if current.cover_active else "실패"
-            effect = "다음 자기 턴까지 보통·먼 거리에서 받는 사격에 패널티 +1" if current.cover_active else "추가 불이익 없음"
+            effect = " · 사격에 패널티 +1" if current.cover_active else ""
             session.recent_logs.append(
-                f"은밀행동 주사위 {combat_roll_text(current, roll, rolls, modifier, session=session)} / 기준 {stealth}\n"
-                f"【엄폐 {outcome}】 {current.character_name} · {effect}"
+                f"은밀행동 주사위 {combat_roll_text(current, roll, rolls, modifier, session=session)} / {stealth}\n"
+                f"【엄폐 {outcome}】 {current.character_name}{effect}"
             )
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             session.briefing = (
@@ -2812,10 +2821,9 @@ class CombatView(CombatActionView):
             move_combat_position(session, session.turn_index, target_index, direction)
             distance = combat_distance(session, session.turn_index, target_index)
             outcome = "성공" if succeeded else "실패"
-            movement_result = "추가 행동 가능" if succeeded else "턴 종료"
             log = (
-                f"민첩 주사위 {combat_roll_text(current, roll, rolls, modifier, session=session)} / 기준 {current.dexterity}\n"
-                f"【민첩 {outcome} · {movement_result}】 {current.character_name} ↔ {target.character_name} · {distance}"
+                f"민첩 주사위 {combat_roll_text(current, roll, rolls, modifier, session=session)} / {current.dexterity}\n"
+                f"【이동 {outcome}】 {current.character_name} ↔ {target.character_name} · {distance}"
             )
             session.recent_logs.append(log)
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -2945,8 +2953,6 @@ class CombatView(CombatActionView):
             session.last_attack = f"{current.character_name} → {session.participants[target_index].character_name} · {weapon.name}"
             if random_target:
                 session.last_attack += " · 무작위 대상"
-                session.recent_logs.append(f"【무작위 대상】 {current.character_name} → {session.participants[target_index].character_name}")
-                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             session.last_attack_events = []
             session.briefing = f"{current.character_name} → {session.participants[target_index].character_name}, 공격 판정 중이에요."
             await self.process_pending_attack(interaction)
@@ -2978,24 +2984,25 @@ class CombatView(CombatActionView):
             net_modifier = attack.modifier + distance_modifier + outnumbered_bonus - burst_penalty - cover_penalty
             roll, rolls, net_modifier = roll_combat_d100(current, net_modifier, session=session)
             result = coc_combat_check_result(roll, attack.skill_value)
-            die_text = f"1d100 [{', '.join(str(value) for value in rolls)}]"
-            mode_text = (
-                f" (보너스 +{net_modifier})" if net_modifier > 0 else
-                f" (패널티 +{-net_modifier})" if net_modifier < 0 else
-                " (일반 굴림 · 보정 상쇄)" if any((distance_modifier, outnumbered_bonus, burst_penalty, cover_penalty, current.major_wound, current.paralyzed, maintaining_combat_shock(session, current))) else ""
-            )
-            outnumbered_text = " · 수적열세 보너스 +1" if outnumbered_bonus else ""
-            cover_text = " · 엄폐 패널티 +1" if cover_penalty else ""
-            wound_text = " · 중상 패널티 +1" if current.major_wound else ""
-            hold_text = " · 충격 유지 패널티 +1" if maintaining_combat_shock(session, current) else ""
-            paralysis_text = f" · 마비 패널티 +{current.paralysis_stacks}" if current.paralyzed else ""
+            dice_text = combat_roll_text(current, roll, rolls, net_modifier, session=session)
+            reasons = []
+            if distance_modifier:
+                reasons.append("근거리" if distance_modifier > 0 else "먼 거리")
+            if burst_penalty:
+                reasons.append(f"연사 {shot_number}발째")
+            if outnumbered_bonus:
+                reasons.append("수적열세")
+            if cover_penalty:
+                reasons.append("엄폐")
+            reason_text = " · " + ", ".join(reasons) if reasons else ""
             if is_projectile_weapon(weapon) and weapon.ammo is not None:
                 weapon.ammo -= 1
             ammo_text = f" · 남은 탄약 {weapon.ammo}" if is_projectile_weapon(weapon) else ""
             shot_text = f" · {shot_number}발째" if is_projectile_weapon(weapon) else ""
+            random_text = " · 무작위" if "무작위 대상" in session.last_attack else ""
             line = (
-                f"주사위 {die_text}{mode_text} → 적용 {roll} / 기준 {attack.skill_value}{outnumbered_text}{cover_text}{wound_text}{hold_text}{paralysis_text}{ammo_text}\n"
-                f"【{result}】 {current.character_name} → {target.character_name} · {weapon.name}{shot_text}"
+                f"{current.character_name} → {target.character_name} · {weapon.name}{shot_text}{random_text}\n"
+                f"{dice_text} / {attack.skill_value}{reason_text}{ammo_text} 【{result}】"
             )
             session.recent_logs.append(line)
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -3020,7 +3027,7 @@ class CombatView(CombatActionView):
                 luck_succeeded = luck_value is not None and luck_roll <= luck_value
                 if luck_succeeded:
                     malfunction_log = (
-                        f"행운 주사위 {luck_text} / 기준 {luck_value}\n"
+                        f"행운 주사위 {luck_text} / {luck_value}\n"
                         f"【무기 고장 · 행운 성공】 {weapon.name}만 고장났어요!"
                     )
                     session.last_attack_events.append(f"{weapon.name} 고장! 행운 판정에 성공해 본인 피해는 없었어요.")
@@ -3029,7 +3036,7 @@ class CombatView(CombatActionView):
                     self_damage, damage_detail = roll_damage_formula(weapon.damage)
                     self_damage, health_text = apply_combat_damage(current, self_damage, current)
                     malfunction_log = (
-                        f"행운 주사위 {luck_text} / 기준 {luck_display} · 피해 {damage_detail} = {self_damage}\n"
+                        f"행운 주사위 {luck_text} / {luck_display} · 피해 {damage_detail} = {self_damage}\n"
                         f"【무기 고장 · 행운 실패 · 본인에게 {self_damage} 데미지!】 {current.character_name} · {health_text}"
                     )
                     session.last_attack_events.append(
@@ -3097,8 +3104,8 @@ class CombatView(CombatActionView):
             )
             damage, health_text = apply_combat_damage(target, damage, attacker)
             session.recent_logs.append(
-                f"피해 주사위 {detail} = {damage}\n"
-                f"【{result} · {damage} 데미지!】 {target.character_name} · {health_text}"
+                f"피해 {detail}\n"
+                f"【{damage} 피해】 {target.character_name} · {health_text}"
             )
             session.last_attack_events.append(
                 f"{weapon.name}{' ' + str(shot_number) + '발째' if is_projectile_weapon(weapon) else ''} 공격으로 {target.character_name}에게 {damage} 데미지! "
@@ -3486,7 +3493,7 @@ class CombatDefenseView(CombatActionView):
         rank = ranks[result]
         attack_ranks = [ranks[hit_result] for _hit_roll, hit_result, _shot in attack.hits]
         session.recent_logs.append(
-            f"주사위 {combat_roll_text(defender, roll, rolls, modifier, session=session)} / 기준 {defense_skill}\n"
+            f"주사위 {combat_roll_text(defender, roll, rolls, modifier, session=session)} / {defense_skill}\n"
             f"【{result}】 {defender.character_name}의 {action} 판정"
             + (f" · {counter_weapon.name}" if counter_weapon is not None else "")
         )
@@ -3503,7 +3510,7 @@ class CombatDefenseView(CombatActionView):
             counter_weapon.broken = True
             luck_roll, luck_rolls, luck_modifier = roll_combat_d100(defender, session=session)
             succeeded = counter_luck is not None and luck_roll <= counter_luck
-            detail = f"행운 주사위 {combat_roll_text(defender, luck_roll, luck_rolls, luck_modifier, session=session)} / 기준 {counter_luck}"
+            detail = f"행운 주사위 {combat_roll_text(defender, luck_roll, luck_rolls, luck_modifier, session=session)} / {counter_luck}"
             if succeeded:
                 outcome = f"【반격 무기 고장 · 행운 성공】 {counter_weapon.name}만 고장났어요."
             else:
@@ -3537,7 +3544,7 @@ class CombatDefenseView(CombatActionView):
                                                critical=counter_weapon.impaling and result in {"극단적 성공", "대성공"})
             damage, health_text = apply_combat_damage(attacker, damage, defender)
             session.recent_logs.append(
-                f"{counter_weapon.name} 피해 {detail} = {damage}\n"
+                f"{counter_weapon.name} 피해 {detail}\n"
                 f"【반격 성공 · {damage} 데미지!】 {attacker.character_name} · {health_text}"
             )
             session.last_attack_events.append(
@@ -3552,7 +3559,7 @@ class CombatDefenseView(CombatActionView):
             await check_combat_major_wound(session, attacker, damage)
             turn_summary = f"{defender.character_name}의 반격이 성공했어요."
         else:
-            session.recent_logs.append(f"【반격 실패】 {defender.character_name} · 공격보다 높은 성공 단계가 아니에요.")
+            session.recent_logs.append(f"【반격 실패】 {defender.character_name}")
             session.last_attack_events.append(f"{defender.character_name}의 반격 실패.")
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await CombatView(session).apply_incoming_hits()

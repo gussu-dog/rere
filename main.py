@@ -1151,13 +1151,15 @@ class CombatParticipant:
     summons_used: int = 0
     round_attack_due: int = 0
     round_attack_target: int | None = None
-    round_attack_distance: str = "보통거리"
+    round_attack_distance: int = 3
     spawn_round: int = 0
     armor_boosted: bool = False
     snared: bool = False
     hunt_target: int | None = None
     hunt_attacks_left: int = 0
     magic_points: int | None = None
+    position: int = 0
+    field_symbol: str = ""
     paralysis_stacks: int = 0
     paralysis_skip_end_serial: int = -1
 
@@ -1192,7 +1194,6 @@ class CombatSession:
     round_number: int = 1
     turn_index: int = 0
     turn_serial: int = 1
-    distances: dict[tuple[int, int], str] = field(default_factory=dict)
     initiative_logs: list[str] = field(default_factory=list)
     recent_logs: list[str] = field(default_factory=list)
     pending_attack: PendingCombatAttack | None = None
@@ -1382,7 +1383,44 @@ def combat_roll_text(member: CombatParticipant, roll: int, rolls: list[int], mod
 
 
 def combat_distance(session: CombatSession, first: int, second: int) -> str:
-    return session.distances.get(tuple(sorted((first, second))), "보통거리")
+    gap = abs(session.participants[first].position - session.participants[second].position)
+    return "근거리" if gap <= 1 else "보통거리" if gap <= 3 else "먼 거리"
+
+
+def move_combat_position(session: CombatSession, mover: int, target: int, direction: int, *, adjacent: bool = False) -> None:
+    member, other = session.participants[mover], session.participants[target]
+    delta = other.position - member.position
+    sign = 1 if delta >= 0 else -1
+    if adjacent:
+        member.position = other.position - sign
+    else:
+        member.position += sign * (-direction)
+
+
+def initialize_combat_field(session: CombatSession) -> None:
+    player_number = 0
+    for member in session.participants:
+        if member.enemy_id:
+            member.position = 3
+            member.field_symbol = "◎" if member.enemy_id != "minion" else "ⓐ"
+        else:
+            member.field_symbol = chr(ord("①") + player_number)
+            member.position = 0 if session.mode == "레이드" else (player_number % 2) * 3
+            player_number += 1
+
+
+def combat_hp_bar(member: CombatParticipant) -> str:
+    filled = min(10, max(0, (member.hp * 10 + member.max_hp - 1) // member.max_hp)) if member.max_hp else 0
+    return "█" * filled + "░" * (10 - filled)
+
+
+def render_combat_field(session: CombatSession) -> str:
+    members = [member for member in session.participants if combat_is_active(member)]
+    if not members:
+        return "필드\n참가자 없음"
+    positions = range(max(member.position for member in members), min(member.position for member in members) - 1, -1)
+    lines = [" ".join(member.field_symbol for member in members if member.position == position) for position in positions]
+    return "필드\n" + "\n".join(lines)
 
 
 def combat_targets(session: CombatSession, weapon: CombatWeapon | None = None) -> list[int]:
@@ -1403,8 +1441,9 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         roster_members = [session.participants[i] for i in order]
         roster_members += [member for i, member in enumerate(session.participants) if i not in order]
         roster = "\n".join(
-            (f"{member.character_name}(누적 피해 {member.damage_received} · HP 없음)" if member.enemy_id == "dummy" else
-            f"{member.character_name}(민첩 {member.dexterity} · HP {member.hp}/{member.max_hp}"
+            (f"{member.field_symbol} {member.character_name}(누적 피해 {member.damage_received} · HP 없음)" if member.enemy_id == "dummy" else
+            f"{'▶ ' if member is session.participants[session.turn_index] else ''}{member.field_symbol} {member.character_name} · 민첩 {member.dexterity}\n"
+            f"{combat_hp_bar(member)} HP {member.hp}/{member.max_hp}"
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
             f"{' · 마력 ' + str(member.magic_points) if member.magic_points is not None else ''}"
             f"{' · 충격 면역' if member.enemy_id == 'chimera' else ''}"
@@ -1419,7 +1458,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
             f"{' · 지속' if combat_is_active(member) and any('지속' in effect.spec.kinds for effect in active_combat_statuses(session, member)) else ''}"
-            f"{' · 기권' if member.forfeited else ' · 기절(탈락)' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''})")
+            f"{' · 기권' if member.forfeited else ' · 기절(탈락)' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''}")
             for member in roster_members
         )
     else:
@@ -1439,14 +1478,9 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
-    distances = " · ".join(
-        f"{session.participants[index].character_name}: {combat_distance(session, session.turn_index, index)}"
-        for index in combat_targets(session)
-    )
     sections = [
         f"모의전투 · {session.mode} | {session.round_number}라운드"
         + (f" / 제한 {session.round_limit}라운드" if session.round_limit else "") + "\n"
-        + f"{current.character_name} 기준 거리: {distances}\n"
         f"행동 순서\n{roster}"
     ]
     if session.round_limit and session.round_number in CHIMERA_ROUND_WARNINGS:
@@ -1464,6 +1498,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
     sections.append("")
     log_section_index = len(sections) - 1
+    sections.append(render_combat_field(session))
     if prompt:
         sections.append(prompt)
     briefing = session.briefing or f"{current.character_name}의 턴이에요!"
@@ -1825,14 +1860,13 @@ async def trigger_round_raid_attack(session: CombatSession) -> bool:
         if combat_is_shocked(session, enemy) or maintaining_combat_shock(session, enemy):
             await show_raid_event(session, "【예고 공격 취소】 키메라가 충격에 묶여 도약하지 못했어요.")
             continue
-        order = ["근거리", "보통거리", "먼 거리"]
-        distance = combat_distance(session, enemy_index, target_index)
-        modifier = -1 if order.index(distance) > order.index(enemy.round_attack_distance) else 0
+        gap = abs(enemy.position - session.participants[target_index].position)
+        modifier = -1 if gap > enemy.round_attack_distance else 0
         resume = session.turn_index
         await publish_combat_panel(session, None)
         await show_raid_event(session, f"【예고 공격 발동】 {session.round_number}라운드 · {session.participants[target_index].character_name}에게 폭주 도약!"
                               + (" · 거리 벌리기 패널티 +1" if modifier else ""))
-        session.distances[tuple(sorted((enemy_index, target_index)))] = "근거리"
+        move_combat_position(session, enemy_index, target_index, -1, adjacent=True)
         await begin_raid_attack(session, enemy_index, target_index, 1, modifier=modifier, resume_turn_index=resume)
         return True
     return False
@@ -1851,6 +1885,8 @@ async def summon_raid_minion(session: CombatSession, summoner: CombatParticipant
     # Freeze this round's order before appending the reinforcement.
     if not session.turn_order:
         session.turn_order = list(range(len(session.participants)))
+    minion.position = summoner.position
+    minion.field_symbol = chr(ord("ⓐ") + summoner.summons_used - 1)
     session.participants.append(minion)
     await show_raid_event(session,
         f"【실험체 소환】 {minion.character_name} · HP 6 · 민첩 35 · 근접전 35 · 피해 1d3\n"
@@ -1922,13 +1958,13 @@ async def take_chimera_turn(session: CombatSession, *, continuation: bool = Fals
     if step == 5 and enemy.round_attack_target is None:
         enemy.round_attack_target = random.choice(targets)
         enemy.round_attack_due = session.round_number + 1
-        enemy.round_attack_distance = combat_distance(session, enemy_index, enemy.round_attack_target)
+        enemy.round_attack_distance = abs(enemy.position - session.participants[enemy.round_attack_target].position)
         await show_raid_event(session,
             f"【폭주 도약 예고】 {with_particle(session.participants[enemy.round_attack_target].character_name, '를', '을')} 노리고 있어요!\n"
             f"{enemy.round_attack_due}라운드 시작에 공격 · 지금 행동은 계속 진행")
     if step == 2:
         target_index = await choose_raid_target(session, enemy, targets)
-        session.distances[tuple(sorted((enemy_index, target_index)))] = "근거리"
+        move_combat_position(session, enemy_index, target_index, -1, adjacent=True)
         await show_raid_event(session, f"【도약 공격】 키메라가 {session.participants[target_index].character_name}에게 바로 덮쳐요!")
         await begin_raid_attack(session, enemy_index, target_index, 1)
         return
@@ -1947,11 +1983,9 @@ async def take_chimera_turn(session: CombatSession, *, continuation: bool = Fals
     target_index = await choose_raid_target(session, enemy, candidates)
     close_targets = [target_index] if combat_distance(session, enemy_index, target_index) == "근거리" else []
     if not close_targets:
-        order = ["근거리", "보통거리", "먼 거리"]
-        distance = ("근거리" if weapon_index == 2 and enemy.enemy_special == "charge" else
-                    order[max(0, order.index(combat_distance(session, enemy_index, target_index)) - 1)])
         roll, rolls, modifier = roll_combat_d100(enemy, session=session)
-        session.distances[tuple(sorted((enemy_index, target_index)))] = distance
+        move_combat_position(session, enemy_index, target_index, -1, adjacent=weapon_index == 2 and enemy.enemy_special == "charge")
+        distance = combat_distance(session, enemy_index, target_index)
         enemy.movement_choice = "move"
         success = coc_combat_check_result(roll, enemy.dexterity) not in {"실패", "대실패"}
         await show_raid_event(session,
@@ -2159,11 +2193,9 @@ async def apply_combat_hit_effects(session: CombatSession, attacker: CombatParti
         session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
         session.last_attack_events.append(f"{target.character_name}: 독액에 발이 묶였어요.")
     if weapon.knockback:
-        order = ["근거리", "보통거리", "먼 거리"]
-        pair = tuple(sorted((source_index, target_index)))
-        previous = combat_distance(session, *pair)
-        session.distances[pair] = order[min(2, order.index(previous) + 1)]
-        text = f"【밀려남】 {target.character_name} · {previous} → {session.distances[pair]}"
+        previous = combat_distance(session, source_index, target_index)
+        move_combat_position(session, target_index, source_index, 1)
+        text = f"【밀려남】 {target.character_name} · {previous} → {combat_distance(session, source_index, target_index)}"
         session.recent_logs.append(text)
         session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
         session.last_attack_events.append(text)
@@ -2364,6 +2396,7 @@ class CombatLobbyView(discord.ui.View):
                     member.damage_received = 0
                 session.participants, session.initiative_logs = sort_combat_initiative(session.participants)
                 session.turn_order = list(range(len(session.participants)))
+                initialize_combat_field(session)
                 for member in session.participants:
                     if member.enemy_id == "chimera":
                         session.recent_logs.append(
@@ -2752,7 +2785,6 @@ class CombatView(CombatActionView):
             if current.movement_choice == "cover":
                 await interaction.response.send_message("엄폐를 시도한 턴에는 거리를 이동할 수 없어요.", ephemeral=True)
                 return
-            distance_order = ["근거리", "보통거리", "먼 거리"]
             targets = [i for i in combat_targets(session)
                        if combat_distance(session, session.turn_index, i) != ("근거리" if direction < 0 else "먼 거리")]
             if not targets:
@@ -2769,17 +2801,12 @@ class CombatView(CombatActionView):
                 await interaction.response.send_message("현재 이동할 수 없는 상대예요.", ephemeral=True)
                 return
             target = session.participants[target_index]
-            old_index = distance_order.index(combat_distance(session, session.turn_index, target_index))
-            new_index = min(max(old_index + direction, 0), len(distance_order) - 1)
-            if new_index == old_index:
-                await interaction.response.send_message("더 이동할 수 없는 거리예요.", ephemeral=True)
-                return
             await interaction.response.defer()
             roll, rolls, modifier = roll_combat_d100(current, -1 if current.snared else 0, session=session)
             current.movement_choice = "move"
             succeeded = roll <= current.dexterity
-            distance = distance_order[new_index]
-            session.distances[tuple(sorted((session.turn_index, target_index)))] = distance
+            move_combat_position(session, session.turn_index, target_index, direction)
+            distance = combat_distance(session, session.turn_index, target_index)
             outcome = "성공" if succeeded else "실패"
             movement_result = "추가 행동 가능" if succeeded else "턴 종료"
             log = (

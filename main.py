@@ -1419,7 +1419,11 @@ def render_combat_field(session: CombatSession) -> str:
     if not members:
         return "필드\n참가자 없음"
     positions = range(max(member.position for member in members), min(member.position for member in members) - 1, -1)
-    lines = [" ".join(member.field_symbol for member in members if member.position == position) for position in positions]
+    current = session.participants[session.turn_index]
+    lines = [" ".join(
+        member.field_symbol + (" ◀" if member is current else "")
+        for member in members if member.position == position
+    ) for position in positions]
     return "필드\n" + "\n".join(lines)
 
 

@@ -1315,7 +1315,8 @@ async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) ->
             "charge": CombatWeapon("돌진", "근접전 | 격투", "1d6"),
             "burst": CombatWeapon("폭주 분출", "생체 공격", "1d6"),
         }
-        return weapons + [specials[key] for key in member.enemy_specials]
+        return weapons + [specials[key] for key in member.enemy_specials] + [
+            CombatWeapon("폭주 도약", "근접전 | 격투", "2d4")]
     return []
 
 
@@ -1901,7 +1902,8 @@ async def trigger_round_raid_attack(session: CombatSession) -> bool:
         await show_raid_event(session, f"【폭주 도약 발동】\n키메라가 땅을 박차고 {session.participants[target_index].character_name}에게 덮쳐듭니다!"
                               + (" · 거리 벌리기 패널티 +1" if modifier else ""))
         move_combat_position(session, enemy_index, target_index, -1, adjacent=True)
-        await begin_raid_attack(session, enemy_index, target_index, 1, modifier=modifier, resume_turn_index=resume)
+        weapon_index = next(i for i, weapon in enumerate(enemy.weapons) if weapon.name == "폭주 도약")
+        await begin_raid_attack(session, enemy_index, target_index, weapon_index, modifier=modifier, resume_turn_index=resume)
         return True
     return False
 

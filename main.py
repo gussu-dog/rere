@@ -1417,8 +1417,8 @@ def initialize_combat_field(session: CombatSession) -> None:
 
 
 def combat_hp_bar(member: CombatParticipant) -> str:
-    filled = min(10, max(0, (member.hp * 10 + member.max_hp - 1) // member.max_hp)) if member.max_hp else 0
-    return "█" * filled + "░" * (10 - filled)
+    filled = min(5, max(0, (member.hp * 5 + member.max_hp - 1) // member.max_hp)) if member.max_hp else 0
+    return "●" * filled + "○" * (5 - filled)
 
 
 def render_combat_field(session: CombatSession) -> str:

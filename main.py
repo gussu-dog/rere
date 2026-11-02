@@ -1135,6 +1135,8 @@ class CombatParticipant:
     movement_choice: str = ""
     major_wound: bool = False
     temporarily_treated: bool = False
+    spirit: int | None = None
+    fog_checked_round: int = 0
     unconscious: bool = False
     forfeited: bool = False
     status_effects: list[CombatStatusEffect] = field(default_factory=list)
@@ -1207,8 +1209,8 @@ class CombatSession:
     mode: str = "대련"
     enemy_id: str = ""
     turn_order: list[int] = field(default_factory=list)
-    round_limit: int = 0
-    raid_timed_out: bool = False
+    fog_start_round: int = 0
+    fog_processed_round: int = 0
 
 
 class CombatLogEntry(str):
@@ -1251,7 +1253,7 @@ CHIMERA_ROUND_WARNINGS = {
     7: "통로 너머에서 철문이 하나씩 닫히는 소리가 들려요. 아직 돌아갈 수 있을까요?",
     8: "경보음이 갑자기 끊겼어요. 벽 너머에서 무언가가 천천히 움직이고 있어요.",
     9: "출구 아래로 검은 액체가 스며들어요. 이제 이곳에 남은 시간이 얼마 없어요.",
-    10: "마지막 라운드예요! 이번 라운드가 끝나면 실험구역이 봉쇄돼요. 반드시 키메라를 쓰러뜨려야 해요!",
+    10: "검은 안개가 실험구역을 덮쳐옵니다. 정신을 붙잡지 못하면 안개에 삼켜집니다…",
 }
 
 
@@ -1523,17 +1525,20 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         if session.mode == "레이드":
             enemy = ("\n상대: 연습용 허수아비 · HP·공격·회피·반격 없음\n모집자가 훈련 종료를 눌러 마칠 수 있어요."
                      if session.enemy_id == "dummy" else
-                     "\n상대: 실험키메라 · 장갑 1 · 충격 면역\n시작 시 능력치·특수기 2개를 무작위로 정해요.\n제한 10라운드 · 시간 초과 시 전멸")
+                     "\n상대: 실험키메라 · 장갑 1 · 충격 면역\n시작 시 능력치·특수기 2개를 무작위로 정해요.\n10라운드부터 검은 안개 · 정신 판정 실패 시 피해")
         body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
         return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
     sections = [
         f"모의전투 · {session.mode} | {session.round_number}라운드"
-        + (f" / 제한 {session.round_limit}라운드" if session.round_limit else "") + "\n"
+        + (f" / {session.fog_start_round}라운드부터 검은 안개" if session.fog_start_round else "") + "\n"
         f"행동 순서\n{roster}"
     ]
-    if session.round_limit and session.round_number in CHIMERA_ROUND_WARNINGS:
+    if session.fog_start_round and session.round_number >= session.fog_start_round:
+        penalty = min(2, session.round_number - session.fog_start_round)
+        sections.append(f"【검은 안개】 정신 판정 {'패널티 +' + str(penalty) if penalty else '일반 굴림'} · 실패 시 3d4 피해")
+    elif session.fog_start_round and session.round_number in CHIMERA_ROUND_WARNINGS:
         sections.append("【실험구역 경고】\n" + CHIMERA_ROUND_WARNINGS[session.round_number])
     for enemy in session.participants:
         if enemy.hunt_target is not None and combat_is_active(enemy):
@@ -1635,13 +1640,9 @@ def render_combat_winner(session: CombatSession) -> str:
                        "무승부 · 양쪽 모두 전투 탈락" if not players and not enemies else
                        "레이드 중단" if players and enemies else "레이드 실패 · 참가자 모두 전투 탈락")
             outcome += f" · 총 {total} 데미지"
-            if session.raid_timed_out:
-                outcome = f"시간 초과 · 참가자 전멸 · 총 {total} 데미지"
     ranking = render_combat_ranking(session)
     summary_budget = max(0, 1850 - len(outcome) - len(ranking))
-    if session.raid_timed_out:
-        summary = "마지막 상황\n철문이 닫히고 검은 안개가 실험구역을 삼켰어요.\n참가자들은 누구도 돌아오지 못했어요."
-    elif session.last_attack:
+    if session.last_attack:
         events = session.last_attack_events[-4:]
         while True:
             details = "\n".join(events) or "피해 적용 전에 전투를 종료했어요."
@@ -1762,18 +1763,8 @@ def advance_combat_turn(session: CombatSession) -> None:
     for _ in range(len(session.participants) * 2):
         position += 1
         if position >= len(order):
-            if session.round_limit and session.round_number >= session.round_limit:
-                session.raid_timed_out = True
-                for member in session.participants:
-                    if not member.enemy_id:
-                        member.hp = 0
-                        member.cover_active = False
-                        record_combat_elimination(session, member)
-                append_combat_log(session, "【제한 시간 초과 · 전멸】 실험구역이 봉쇄됐어요.")
-                session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
-                return
             session.round_number += 1
-            if session.round_limit and session.round_number in CHIMERA_ROUND_WARNINGS:
+            if session.fog_start_round and session.round_number in CHIMERA_ROUND_WARNINGS:
                 append_combat_log(session, "【실험구역 경고】 " + CHIMERA_ROUND_WARNINGS[session.round_number])
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             # Appended reinforcements enter initiative next round. Existing
@@ -1828,17 +1819,73 @@ async def refresh_combat_turn_weapons(session: CombatSession) -> None:
         session.briefing += " 무기 갱신에 실패해 기존 목록으로 진행해요. 다음 차례에 다시 갱신할게요."
 
 
+async def process_combat_black_fog(session: CombatSession) -> bool:
+    if (not session.fog_start_round or session.round_number < session.fog_start_round
+            or session.fog_processed_round == session.round_number):
+        return False
+    players = [member for member in session.participants if not member.enemy_id and combat_is_present(member)]
+    # Read every missing POW value before rolling so retry never rerolls a completed check.
+    try:
+        for member in players:
+            if member.spirit is None:
+                member.spirit = await combat_skill_value(member, "정신")
+                if member.spirit is None:
+                    raise SheetError("정신 값을 찾지 못했어요.")
+    except Exception as exc:
+        print(f"Combat black fog read failed ({type(exc).__name__}).")
+        session.briefing = "정신 값을 읽지 못했어요. 검은 안개 판정을 다시 시도해 주세요."
+        await publish_combat_panel(session, CombatFogRetryView(session))
+        return True
+    penalty = min(2, session.round_number - session.fog_start_round)
+    boss = next(member for member in session.participants if member.enemy_id == "chimera")
+    if not combat_is_active(boss):
+        return await finish_combat_if_decided(session)
+    for member in players:
+        if member.fog_checked_round == session.round_number:
+            continue
+        member.fog_checked_round = session.round_number
+        roll, rolls, modifier = roll_combat_d100(member, -penalty, session=session)
+        result = coc_combat_check_result(roll, member.spirit)
+        success = result not in {"실패", "대실패"}
+        log = (f"{member.character_name} · 검은 안개 정신 판정\n"
+               f"{combat_roll_text(member, roll, rolls, modifier, session=session)} / {member.spirit} 【{result}】")
+        if success:
+            log += "\n【안개를 버텨냈어요 · 피해 없음】"
+            damage = 0
+        else:
+            raw_damage, detail = roll_damage_formula("3d4")
+            damage, health = apply_combat_damage(member, raw_damage, boss)
+            log += f"\n피해 {detail}\n【검은 안개 · {damage} 피해】 {health}"
+            session.last_attack = f"검은 안개 → {member.character_name}"
+            session.last_attack_events = [f"정신 판정 실패 · {damage} 피해 · {health}"]
+        append_combat_log(session, log)
+        session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        session.briefing = "검은 안개가 덮쳐옵니다… 참가자들의 정신 판정을 진행합니다."
+        await session.message.edit(content=render_combat_session(session), view=None)
+        await asyncio.sleep(0.7)
+        if damage:
+            await check_combat_major_wound(session, member, damage)
+    session.fog_processed_round = session.round_number
+    if await finish_combat_if_decided(session):
+        return True
+    current = session.participants[session.turn_index]
+    session.briefing = f"검은 안개 판정이 끝났어요. {current.character_name}의 턴이에요!"
+    return False
+
+
 async def repost_combat_turn(session: CombatSession) -> None:
-    if session.raid_timed_out:
-        await finish_combat_if_decided(session)
-        return
     # A stationary dummy has no player controls. Its turn still ticks ongoing
     # damage and escape checks before moving on, using the same round clock.
     while True:
+        if await process_combat_black_fog(session):
+            return
         if await trigger_round_raid_attack(session):
             return
+        previous_round = session.round_number
         if await prepare_combat_status_turn(session):
             return
+        if session.round_number != previous_round:
+            continue
         if await trigger_round_raid_attack(session):
             return
         current = session.participants[session.turn_index]
@@ -2310,8 +2357,6 @@ async def resolve_automatic_combat_status_checks(session: CombatSession, member:
 
 
 async def prepare_combat_status_turn(session: CombatSession) -> bool:
-    if session.raid_timed_out:
-        return await finish_combat_if_decided(session)
     for _ in range(len(session.participants)):
         member = session.participants[session.turn_index]
         member.status_effects = active_combat_statuses(session, member)
@@ -2342,7 +2387,10 @@ async def prepare_combat_status_turn(session: CombatSession) -> bool:
             return False
         if await finish_combat_if_decided(session):
             return True
+        previous_round = session.round_number
         advance_combat_turn(session)
+        if session.round_number != previous_round:
+            return False
         session.briefing = f"기절 또는 전투불능으로 차례를 넘겨요. 이제 {session.participants[session.turn_index].character_name}의 턴이에요!"
         await refresh_combat_turn_weapons(session)
     return session.phase == "finished"
@@ -2434,6 +2482,14 @@ class CombatLobbyView(discord.ui.View):
                     await interaction.followup.send("마력 충전 무기를 가진 캐릭터의 현재 마력을 읽지 못했어요. 시트의 마력 현재값을 확인한 뒤 다시 시작해 주세요.", ephemeral=True)
                     return
                 magic_by_member = {id(member): value for member, value in zip(magic_users, magic_values)}
+                spirits = {}
+                if session.fog_start_round:
+                    fog_players = [member for member in session.participants if not member.enemy_id]
+                    spirit_values = await asyncio.gather(*(combat_skill_value(member, "정신") for member in fog_players))
+                    if any(value is None for value in spirit_values):
+                        await interaction.followup.send("검은 안개 판정에 필요한 정신 값을 읽지 못했어요. 시트를 확인하고 다시 시작해 주세요.", ephemeral=True)
+                        return
+                    spirits = {id(member): value for member, value in zip(fog_players, spirit_values)}
                 missing_health = [
                     member.character_name for member, (_dexterity, strength, constitution, size, _weapons) in zip(session.participants, combat_data)
                     if strength is None or constitution is None or size is None
@@ -2460,6 +2516,8 @@ class CombatLobbyView(discord.ui.View):
                     member.movement_choice = ""
                     member.major_wound = False
                     member.temporarily_treated = False
+                    member.spirit = spirits.get(id(member))
+                    member.fog_checked_round = 0
                     member.unconscious = False
                     member.forfeited = False
                     member.status_effects = []
@@ -2631,6 +2689,19 @@ class CombatActionView(discord.ui.View):
             session.pending_attack = None
             combat_sessions.pop(session.channel_id, None)
             await session.message.edit(content=render_combat_winner(session), view=None)
+
+
+class CombatFogRetryView(CombatActionView):
+    @discord.ui.button(label="검은 안개 판정 재시도", style=discord.ButtonStyle.primary)
+    async def retry(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        async with self.session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            if not any(member.user_id == interaction.user.id for member in self.session.participants if not member.enemy_id):
+                await interaction.response.send_message("전투 참가자만 재시도할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            await repost_combat_turn(self.session)
 
 
 async def forfeit_combat_member(session: CombatSession, index: int) -> None:
@@ -3756,7 +3827,7 @@ async def start_combat(interaction: discord.Interaction, mode: str = "대련", e
         participants=[make_raid_enemy(enemy_id)] if mode == "레이드" else [],
         mode=mode,
         enemy_id=enemy_id,
-        round_limit=10 if enemy_id == "chimera" else 0,
+        fog_start_round=10 if enemy_id == "chimera" else 0,
     )
     combat_sessions[channel_id] = session
     await interaction.response.send_message(render_combat_session(session), view=CombatLobbyView(session))

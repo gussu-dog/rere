@@ -1519,7 +1519,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         if enemy.round_attack_target is not None and combat_is_active(enemy):
             target = session.participants[enemy.round_attack_target]
             if combat_is_active(target):
-                sections.append(f"【공격 예고】 {enemy.round_attack_due}라운드 시작 · {target.character_name}에게 폭주 도약!\n거리를 넓히면 공격 패널티 +1 · 회피·반격 가능")
+                sections.append(f"【폭주 도약 준비】 {target.character_name}에게 시선 고정\n{enemy.round_attack_due}라운드 키메라 차례 시작에 덮쳐옵니다!\n거리를 넓히면 공격 패널티 +1 · 회피·반격 가능")
     if session.initiative_logs:
         sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
     sections.append("")
@@ -1885,7 +1885,8 @@ async def begin_raid_attack(session: CombatSession, enemy_index: int, target_ind
 async def trigger_round_raid_attack(session: CombatSession) -> bool:
     for enemy_index, enemy in enumerate(session.participants):
         target_index = enemy.round_attack_target
-        if target_index is None or session.round_number < enemy.round_attack_due:
+        if (target_index is None or session.round_number < enemy.round_attack_due
+                or session.turn_index != enemy_index):
             continue
         enemy.round_attack_target = None
         if not combat_is_active(enemy) or not combat_is_active(session.participants[target_index]):
@@ -1897,7 +1898,7 @@ async def trigger_round_raid_attack(session: CombatSession) -> bool:
         modifier = -1 if gap > enemy.round_attack_distance else 0
         resume = session.turn_index
         await publish_combat_panel(session, None)
-        await show_raid_event(session, f"【예고 공격 발동】 {session.round_number}라운드 · {session.participants[target_index].character_name}에게 폭주 도약!"
+        await show_raid_event(session, f"【폭주 도약 발동】\n키메라가 땅을 박차고 {session.participants[target_index].character_name}에게 덮쳐듭니다!"
                               + (" · 거리 벌리기 패널티 +1" if modifier else ""))
         move_combat_position(session, enemy_index, target_index, -1, adjacent=True)
         await begin_raid_attack(session, enemy_index, target_index, 1, modifier=modifier, resume_turn_index=resume)
@@ -1988,8 +1989,8 @@ async def take_chimera_turn(session: CombatSession, *, continuation: bool = Fals
         enemy.round_attack_due = session.round_number + 1
         enemy.round_attack_distance = abs(enemy.position - session.participants[enemy.round_attack_target].position)
         await show_raid_event(session,
-            f"【폭주 도약 예고】 {with_particle(session.participants[enemy.round_attack_target].character_name, '를', '을')} 노리고 있어요!\n"
-            f"{enemy.round_attack_due}라운드 시작에 공격 · 지금 행동은 계속 진행")
+            f"【폭주 도약 준비】\n키메라가 몸을 낮추고 {session.participants[enemy.round_attack_target].character_name}에게 시선을 고정합니다.\n"
+            f"다음 키메라 차례가 시작되면 덮쳐옵니다! · 거리를 벌리면 공격 패널티 +1")
     if step == 2:
         target_index = await choose_raid_target(session, enemy, targets)
         move_combat_position(session, enemy_index, target_index, -1, adjacent=True)
@@ -3163,7 +3164,7 @@ class CombatView(CombatActionView):
                                         modifier=modifier, remaining_targets=rest)
                 return
         if resume is not None:
-            session.briefing = f"예고 공격이 끝났어요. {session.participants[resume].character_name}의 턴이에요!"
+            session.briefing = f"예고 공격이 끝났어요. 이제 {session.participants[resume].character_name}의 일반 행동을 시작해요!"
             await repost_combat_turn(session)
             return
         current = session.participants[session.turn_index]

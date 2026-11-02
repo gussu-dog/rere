@@ -2629,12 +2629,40 @@ async def forfeit_combat_member(session: CombatSession, index: int) -> None:
     await CombatView(session).complete_attack_turn(f"{member.character_name} 기권!")
 
 
+def combat_first_aid_targets(session: CombatSession) -> list[int]:
+    current = session.participants[session.turn_index]
+    if current.enemy_id:
+        return []
+    return [index for index, member in enumerate(session.participants)
+            if not member.enemy_id and combat_is_active(member) and member.hp < member.max_hp
+            and (member is current or (session.mode == "레이드"
+                 and combat_distance(session, session.turn_index, index) == "근거리"))]
+
+
+class CombatFirstAidTargetSelect(discord.ui.Select):
+    def __init__(self, session: CombatSession, targets: list[int]) -> None:
+        self.session = session
+        super().__init__(placeholder="응급처치할 대상", options=[
+            discord.SelectOption(label=trim_choice_name(session.participants[i].character_name), value=str(i),
+                                 description=f"HP {session.participants[i].hp}/{session.participants[i].max_hp}")
+            for i in targets])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await CombatView(self.session).first_aid(interaction, int(self.values[0]))
+
+
+class CombatFirstAidTargetView(CombatActionView):
+    def __init__(self, session: CombatSession, targets: list[int]) -> None:
+        super().__init__(session, back=True)
+        self.add_item(CombatFirstAidTargetSelect(session, targets))
+
+
 class CombatWeaponSelect(discord.ui.Select):
     def __init__(self, session: CombatSession) -> None:
         current = session.participants[session.turn_index]
         available = [
             (index, weapon) for index, weapon in enumerate(current.weapons)
-            if combat_targets(session, weapon)
+            if combat_targets(session, weapon) and not maintaining_combat_shock(session, current)
         ]
         options = [
             discord.SelectOption(
@@ -2646,15 +2674,20 @@ class CombatWeaponSelect(discord.ui.Select):
                     + (" · 고장" if weapon.broken else "")
                 ),
             )
-            for index, weapon in available[:25]
+            for index, weapon in available[:24 if combat_first_aid_targets(session) else 25]
         ]
+        if combat_first_aid_targets(session):
+            options.append(discord.SelectOption(label="응급처치", value="first_aid", description="응급처치 판정 · 성공 시 1d3 회복 · 턴 종료"))
         super().__init__(placeholder="사용할 무기를 선택해 주세요", min_values=1, max_values=1, options=options)
         self.session = session
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
         if isinstance(view, CombatView):
-            await view.select_weapon(interaction, int(self.values[0]))
+            if self.values[0] == "first_aid":
+                await view.first_aid(interaction)
+            else:
+                await view.select_weapon(interaction, int(self.values[0]))
 
 
 class CombatView(CombatActionView):
@@ -2673,9 +2706,9 @@ class CombatView(CombatActionView):
                 self.add_item(CombatStatusEscapeSelect(session))
             return
         available_weapons = [weapon for weapon in current.weapons if combat_targets(session, weapon)]
-        if maintaining_combat_shock(session, current):
+        if maintaining_combat_shock(session, current) and not combat_first_aid_targets(session):
             self.add_item(discord.ui.Button(label="충격 유지 중 · 다른 공격 불가", style=discord.ButtonStyle.secondary, disabled=True))
-        elif available_weapons:
+        elif available_weapons or combat_first_aid_targets(session):
             self.add_item(CombatWeaponSelect(session))
         elif any(is_melee_weapon(weapon) for weapon in current.weapons):
             self.add_item(discord.ui.Button(label="근접전은 근거리에서 가능해요", style=discord.ButtonStyle.secondary, disabled=True))
@@ -2881,6 +2914,52 @@ class CombatView(CombatActionView):
                 )
             if succeeded:
                 await interaction.message.edit(content=render_combat_session(session), view=CombatView(session))
+
+    async def first_aid(self, interaction: discord.Interaction, target_index: int | None = None) -> None:
+        session = self.session
+        async with session.lock:
+            if not await self.ensure_current(interaction) or not await self.allow_normal_action(interaction):
+                return
+            current = session.participants[session.turn_index]
+            if interaction.user.id != current.user_id:
+                await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
+                return
+            targets = combat_first_aid_targets(session)
+            if not targets or (target_index is not None and target_index not in targets):
+                await interaction.response.send_message("응급처치할 수 있는 대상이 없어요. 본인이나 근거리 동료의 빠진 HP가 있어야 해요.", ephemeral=True)
+                return
+            if target_index is None and len(targets) > 1:
+                await interaction.response.edit_message(content=render_combat_session(session, "응급처치할 대상 선택"),
+                                                        view=CombatFirstAidTargetView(session, targets))
+                return
+            target_index = targets[0] if target_index is None else target_index
+            await interaction.response.defer()
+            try:
+                skill = await combat_skill_value(current, "응급처치")
+                if skill is None:
+                    raise SheetError("응급처치 값을 시트에서 찾지 못했어요.")
+            except Exception as exc:
+                print(f"Combat first aid read failed ({type(exc).__name__}).")
+                await interaction.followup.send("응급처치 값을 읽지 못했어요. 다시 선택해 주세요. 턴은 소모하지 않았어요.", ephemeral=True)
+                return
+            target = session.participants[target_index]
+            roll, rolls, modifier = roll_combat_d100(current, session=session)
+            result = coc_combat_check_result(roll, skill)
+            success = result not in {"실패", "대실패"}
+            log = (f"{current.character_name} → {target.character_name} · 응급처치\n"
+                   f"{combat_roll_text(current, roll, rolls, modifier, session=session)} / {skill} 【{result}】")
+            if success:
+                healing = random.randint(1, 3)
+                previous = target.hp
+                target.hp = min(target.max_hp, target.hp + healing)
+                log += f"\n회복 1d3 [{healing}]\n【{target.hp - previous} 회복】 HP {previous} → {target.hp}"
+            else:
+                log += "\n【회복 없음】"
+            append_combat_log(session, log)
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            await interaction.message.edit(content=render_combat_session(session), view=None)
+            await asyncio.sleep(0.7)
+            await self.complete_attack_turn(f"{current.character_name}의 응급처치 {'성공' if success else '실패'}!")
 
     async def select_weapon(self, interaction: discord.Interaction, weapon_index: int) -> None:
         session = self.session

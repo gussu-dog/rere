@@ -1249,6 +1249,22 @@ CHIMERA_SPECIAL_DETAILS = {
     "tail": "1d4 피해 · 명중하면 대상을 반대 방향으로 한 칸 밀어냄",
     "charge": "민첩 판정으로 근거리까지 돌진 · 성공하면 1d6 공격, 실패하면 이동 후 턴 종료",
 }
+BLACK_FOG_VISIONS = (
+    "안개 속에서 당신과 똑같은 얼굴이 소리 없이 웃고 있습니다.",
+    "눈을 감았는데도 누군가의 눈동자가 바로 앞에 떠 있습니다.",
+    "발밑의 그림자가 당신보다 한 박자 늦게 움직입니다.",
+    "등 뒤에서 익숙한 목소리가 이름을 부릅니다. 돌아보면 아무도 없습니다.",
+    "있을 리 없는 문이 열리고, 그 안에서 당신이 걸어 나옵니다.",
+    "동료들의 얼굴이 잠깐씩 기억나지 않는 누군가의 얼굴로 바뀝니다.",
+    "안개 너머에 사람들이 서 있습니다. 모두 당신 쪽으로 고개를 기울입니다.",
+    "벽에 비친 그림자의 수가 여기 있는 사람보다 하나 더 많습니다.",
+    "눈을 깜빡일 때마다 멀리 있던 형체가 조금씩 가까워집니다.",
+    "누군가 귓가에서 숫자를 셉니다. 당신의 숨소리에 맞춰서요.",
+    "바닥이 아득한 구멍처럼 보입니다. 그 아래에서 무언가 올려다봅니다.",
+    "안개 속의 손이 이쪽을 가리킵니다. 손가락의 관절이 하나씩 더 늘어납니다.",
+)
+
+
 CHIMERA_ROUND_WARNINGS = {
     7: "통로 너머에서 철문이 하나씩 닫히는 소리가 들려요. 아직 돌아갈 수 있을까요?",
     8: "경보음이 갑자기 끊겼어요. 벽 너머에서 무언가가 천천히 움직이고 있어요.",
@@ -1847,7 +1863,8 @@ async def process_combat_black_fog(session: CombatSession) -> bool:
         roll, rolls, modifier = roll_combat_d100(member, -penalty, session=session)
         result = coc_combat_check_result(roll, member.spirit)
         success = result not in {"실패", "대실패"}
-        log = (f"{member.character_name} · 검은 안개 정신 판정\n"
+        vision = random.choice(BLACK_FOG_VISIONS)
+        log = (f"{member.character_name} · 검은 안개\n{vision}\n"
                f"{combat_roll_text(member, roll, rolls, modifier, session=session)} / {member.spirit} 【{result}】")
         if success:
             log += "\n【안개를 버텨냈어요 · 피해 없음】"

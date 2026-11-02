@@ -1134,6 +1134,7 @@ class CombatParticipant:
     cover_active: bool = False
     movement_choice: str = ""
     major_wound: bool = False
+    temporarily_treated: bool = False
     unconscious: bool = False
     forfeited: bool = False
     status_effects: list[CombatStatusEffect] = field(default_factory=list)
@@ -1325,8 +1326,12 @@ def combat_opponents(session: CombatSession, first: int, second: int) -> bool:
         bool(session.participants[first].enemy_id) != bool(session.participants[second].enemy_id))
 
 
+def combat_is_present(member: CombatParticipant) -> bool:
+    return (member.enemy_id == "dummy" or member.hp > 0) and not member.forfeited
+
+
 def combat_is_active(member: CombatParticipant) -> bool:
-    return (member.enemy_id == "dummy" or member.hp > 0) and not member.unconscious and not member.forfeited
+    return combat_is_present(member) and not member.unconscious
 
 
 def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatParticipant) -> tuple[int, str]:
@@ -1339,6 +1344,11 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
             source.damage_dealt += damage
     if target.enemy_id == "dummy":
         return damage, f"누적 피해 {target.damage_received}"
+    reopened = ""
+    if damage > 0 and target.temporarily_treated:
+        target.temporarily_treated = False
+        target.major_wound = True
+        reopened = " · 【상처 재발 · 중상】"
     previous_hp = target.hp
     target.hp = max(0, target.hp - damage)
     broken_armor = ""
@@ -1346,7 +1356,7 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
         target.armor_boosted = False
         target.armor = 1
         broken_armor = " · 【강화 장갑 파괴!】"
-    return damage, f"{armor_text}HP {previous_hp} → {target.hp}{' · 【전투불능】' if target.hp == 0 else ''}{broken_armor}"
+    return damage, f"{armor_text}HP {previous_hp} → {target.hp}{' · 【전투불능】' if target.hp == 0 else ''}{broken_armor}{reopened}"
 
 
 def calculate_combat_max_hp(member: CombatParticipant) -> int:
@@ -1429,7 +1439,7 @@ def separate_combat_boss_position(session: CombatSession) -> None:
     boss_positions = {member.position for member in session.participants
                       if member.enemy_id and member.enemy_id != "minion" and combat_is_active(member)}
     for member in session.participants:
-        if not member.enemy_id and combat_is_active(member) and member.position in boss_positions:
+        if not member.enemy_id and combat_is_present(member) and member.position in boss_positions:
             member.position -= 1
 
 
@@ -1451,7 +1461,7 @@ def combat_hp_bar(member: CombatParticipant) -> str:
 
 
 def render_combat_field(session: CombatSession) -> str:
-    members = [member for member in session.participants if combat_is_active(member)]
+    members = [member for member in session.participants if combat_is_present(member)]
     if not members:
         return "--------\n참가자 없음\n--------"
     positions = range(max(member.position for member in members), min(member.position for member in members) - 1, -1)
@@ -1494,11 +1504,11 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 독액에 발 묶임(이동 패널티 +1)' if member.snared else ''}"
             f"{' · 마비 ' + str(member.paralysis_stacks) + '중첩(패널티 +' + str(member.paralysis_stacks) + ')' if member.paralyzed else ''}"
             f"{' · 엄폐 중' if member.cover_active and combat_is_active(member) else ''}"
-            f"{' · 중상' if member.major_wound else ''}"
+            f"{' · 중상' if member.major_wound else ' · 임시처치' if member.temporarily_treated else ''}"
             f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
             f"{' · 지속' if combat_is_active(member) and any('지속' in effect.spec.kinds for effect in active_combat_statuses(session, member)) else ''}"
-            f"{' · 기권' if member.forfeited else ' · 기절(탈락)' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''}")
+            f"{' · 기권' if member.forfeited else ' · 기절' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''}")
             for member in roster_members
         )
     else:
@@ -1565,7 +1575,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
 
 
 def record_combat_elimination(session: CombatSession, member: CombatParticipant) -> None:
-    if combat_is_active(member):
+    if combat_is_present(member):
         return
     index = next(index for index, item in enumerate(session.participants) if item is member)
     if index not in session.elimination_order:
@@ -1578,8 +1588,11 @@ def render_combat_ranking(session: CombatSession) -> str:
                  for member in session.participants if not member.enemy_id]
         return "참가자 결과\n" + "\n".join(lines)
     active = sorted((member for member in session.participants if combat_is_active(member)), key=lambda member: member.hp, reverse=True)
-    eliminated = [session.participants[index] for index in reversed(session.elimination_order)]
-    eliminated += [member for member in session.participants if not combat_is_active(member)
+    unconscious = [member for member in session.participants if combat_is_present(member) and member.unconscious]
+    unconscious.sort(key=lambda member: -member.hp)
+    eliminated = [session.participants[index] for index in reversed(session.elimination_order)
+                  if not combat_is_present(session.participants[index])]
+    eliminated += [member for member in session.participants if not combat_is_present(member)
                    and not any(member is item for item in eliminated)]
     all_draw = len(session.participants) > 1 and not active and len({member.hp for member in session.participants}) == 1
     lines = []
@@ -1587,9 +1600,11 @@ def render_combat_ranking(session: CombatSession) -> str:
         rank = next(index + 1 for index, item in enumerate(active) if item.hp == member.hp)
         tied = sum(item.hp == member.hp for item in active) > 1
         lines.append(f"{'공동 ' if tied else ''}{rank}위 {member.character_name} · HP {member.hp}")
-    for position, member in enumerate(eliminated, start=len(active) + 1):
+    for position, member in enumerate(unconscious, start=len(active) + 1):
+        lines.append(f"{position}위 {member.character_name} · HP {member.hp} · 기절")
+    for position, member in enumerate(eliminated, start=len(active) + len(unconscious) + 1):
         rank = "공동 1위" if all_draw else f"{position}위"
-        state = "기권" if member.forfeited else "기절 탈락" if member.unconscious else "HP 0 · 탈락"
+        state = "기권" if member.forfeited else "HP 0 · 탈락"
         lines.append(f"{rank} {member.character_name} · {state}")
     return "최종 순위\n" + "\n".join(lines)
 
@@ -1768,7 +1783,7 @@ def advance_combat_turn(session: CombatSession) -> None:
                 session.turn_order = order
             position = 0
         session.turn_index = order[position]
-        if combat_is_active(session.participants[session.turn_index]):
+        if combat_is_present(session.participants[session.turn_index]):
             session.turn_serial += 1
             session.participants[session.turn_index].cover_active = False
             session.participants[session.turn_index].movement_choice = ""
@@ -1817,12 +1832,14 @@ async def repost_combat_turn(session: CombatSession) -> None:
     if session.raid_timed_out:
         await finish_combat_if_decided(session)
         return
-    if await trigger_round_raid_attack(session):
-        return
     # A stationary dummy has no player controls. Its turn still ticks ongoing
     # damage and escape checks before moving on, using the same round clock.
     while True:
+        if await trigger_round_raid_attack(session):
+            return
         if await prepare_combat_status_turn(session):
+            return
+        if await trigger_round_raid_attack(session):
             return
         current = session.participants[session.turn_index]
         if not current.enemy_id:
@@ -2160,8 +2177,8 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
         member.unconscious = True
         member.cover_active = False
         record_combat_elimination(session, member)
-    status = "중상 · 이후 모든 판정에 패널티 +1" if succeeded else "기절 · 전투 탈락"
-    if succeeded and member.hp <= 0:
+    status = "중상 · 이후 모든 판정에 패널티 +1" if succeeded else "중상 · 기절(응급처치로 회복 가능)"
+    if member.hp <= 0:
         status = "중상 · HP 0으로 전투 탈락"
     append_combat_log(session,
         f"건강 주사위 {dice_text} / {member.constitution}\n"
@@ -2326,7 +2343,7 @@ async def prepare_combat_status_turn(session: CombatSession) -> bool:
         if await finish_combat_if_decided(session):
             return True
         advance_combat_turn(session)
-        session.briefing = f"지속 피해로 전투에서 탈락했어요. 이제 {session.participants[session.turn_index].character_name}의 턴이에요!"
+        session.briefing = f"기절 또는 전투불능으로 차례를 넘겨요. 이제 {session.participants[session.turn_index].character_name}의 턴이에요!"
         await refresh_combat_turn_weapons(session)
     return session.phase == "finished"
 
@@ -2442,6 +2459,7 @@ class CombatLobbyView(discord.ui.View):
                     member.cover_active = False
                     member.movement_choice = ""
                     member.major_wound = False
+                    member.temporarily_treated = False
                     member.unconscious = False
                     member.forfeited = False
                     member.status_effects = []
@@ -2634,7 +2652,9 @@ def combat_first_aid_targets(session: CombatSession) -> list[int]:
     if current.enemy_id:
         return []
     return [index for index, member in enumerate(session.participants)
-            if not member.enemy_id and combat_is_active(member) and member.hp < member.max_hp
+            if not member.enemy_id and combat_is_present(member)
+            and (member.hp < member.max_hp or member.major_wound or member.paralyzed or member.unconscious
+                 or any("지속" in effect.spec.kinds for effect in active_combat_statuses(session, member)))
             and (member is current or (session.mode == "레이드"
                  and combat_distance(session, session.turn_index, index) == "근거리"))]
 
@@ -2644,7 +2664,11 @@ class CombatFirstAidTargetSelect(discord.ui.Select):
         self.session = session
         super().__init__(placeholder="응급처치할 대상", options=[
             discord.SelectOption(label=trim_choice_name(session.participants[i].character_name), value=str(i),
-                                 description=f"HP {session.participants[i].hp}/{session.participants[i].max_hp}")
+                                 description=trim_choice_name(f"HP {session.participants[i].hp}/{session.participants[i].max_hp}"
+                                     + (" · 기절" if session.participants[i].unconscious else "")
+                                     + (" · 중상" if session.participants[i].major_wound else "")
+                                     + (" · 마비" if session.participants[i].paralyzed else "")
+                                     + (" · 지속" if any("지속" in effect.spec.kinds for effect in active_combat_statuses(session, session.participants[i])) else "")))
             for i in targets])
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -2677,7 +2701,7 @@ class CombatWeaponSelect(discord.ui.Select):
             for index, weapon in available[:24 if combat_first_aid_targets(session) else 25]
         ]
         if combat_first_aid_targets(session):
-            options.append(discord.SelectOption(label="응급처치", value="first_aid", description="응급처치 판정 · 성공 시 1d3 회복 · 턴 종료"))
+            options.append(discord.SelectOption(label="응급처치", value="first_aid", description="성공 시 1d3 회복 · 중상·마비·지속·기절 치료 · 턴 종료"))
         super().__init__(placeholder="사용할 무기를 선택해 주세요", min_values=1, max_values=1, options=options)
         self.session = session
 
@@ -2926,7 +2950,7 @@ class CombatView(CombatActionView):
                 return
             targets = combat_first_aid_targets(session)
             if not targets or (target_index is not None and target_index not in targets):
-                await interaction.response.send_message("응급처치할 수 있는 대상이 없어요. 본인이나 근거리 동료의 빠진 HP가 있어야 해요.", ephemeral=True)
+                await interaction.response.send_message("응급처치할 수 있는 대상이 없어요. 본인이나 근거리 동료에게 빠진 HP 또는 치료할 상태가 있어야 해요.", ephemeral=True)
                 return
             if target_index is None and len(targets) > 1:
                 await interaction.response.edit_message(content=render_combat_session(session, "응급처치할 대상 선택"),
@@ -2952,7 +2976,29 @@ class CombatView(CombatActionView):
                 healing = random.randint(1, 3)
                 previous = target.hp
                 target.hp = min(target.max_hp, target.hp + healing)
+                treated = []
+                if target.major_wound:
+                    target.major_wound = False
+                    target.temporarily_treated = True
+                    treated.append("중상 → 임시처치")
+                if target.paralyzed:
+                    target.paralysis_stacks = 0
+                    target.paralysis_skip_end_serial = -1
+                    treated.append("마비 해제")
+                if any("지속" in effect.spec.kinds for effect in target.status_effects):
+                    remaining = []
+                    for effect in target.status_effects:
+                        kinds = tuple(kind for kind in effect.spec.kinds if kind != "지속")
+                        if kinds:
+                            remaining.append(replace(effect, spec=replace(effect.spec, kinds=kinds)))
+                    target.status_effects = remaining
+                    treated.append("지속 해제")
+                if target.unconscious:
+                    target.unconscious = False
+                    treated.append("기절 회복")
                 log += f"\n회복 1d3 [{healing}]\n【{target.hp - previous} 회복】 HP {previous} → {target.hp}"
+                if treated:
+                    log += "\n【" + " · ".join(treated) + "】"
             else:
                 log += "\n【회복 없음】"
             append_combat_log(session, log)

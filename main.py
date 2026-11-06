@@ -2544,7 +2544,7 @@ async def take_dream_turn(session: CombatSession) -> None:
     if combat_is_shocked(session, boss):
         effect = next(e for e in active_combat_statuses(session, boss) if "충격" in e.spec.kinds)
         await attempt_combat_status_escape(session, boss, effect)
-        await CombatView(session).complete_attack_turn("고치가 꿈에 묶여 있습니다.")
+        await CombatView(session).complete_attack_turn(f"{with_particle(boss.character_name, '가', '이')} 꿈에 묶여 있습니다.")
         return
     if maintaining_combat_shock(session, boss):
         await CombatView(session).complete_attack_turn("꿈이 멈춰 있습니다.")
@@ -2566,7 +2566,7 @@ async def take_dream_turn(session: CombatSession) -> None:
     elif pattern == "pit":
         position = random.choice(players).position
         session.dream_events.append(DreamEvent("pit", session.dream_boss_turns + 1, position=position))
-        await dream_log(session, "【바닥 없는 자리】 × 위치가 무너지기 시작합니다.\n다음 고치 차례 전에 × 위치에서 이동하세요.")
+        await dream_log(session, "【바닥 없는 자리】 × 위치가 무너지기 시작합니다.\n다음 보스 차례 전에 × 위치에서 이동하세요.")
     elif pattern in {"pulse", "eye"}:
         session.dream_events.append(DreamEvent(pattern, session.dream_boss_turns + 1,
                                              damage_start=boss.damage_received, threshold=threshold))

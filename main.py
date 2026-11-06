@@ -1174,6 +1174,13 @@ class CombatParticipant:
     domination_turns: int = 0
     domination_skip_end: int = -1
     domination_last_end: int = -1
+    dream_asleep: bool = False
+    dream_blind: bool = False
+    dream_forbidden: tuple[str, str] | None = None
+    dream_star: int = 0
+    dream_last_end: int = -1
+    dream_angel: bool = False
+    last_used_weapon: tuple[str, str] | None = None
     status_effects: list[CombatStatusEffect] = field(default_factory=list)
     enemy_id: str = ""
     damage_dealt: int = 0
@@ -1237,6 +1244,15 @@ class PendingCombatAttack:
 
 
 @dataclass
+class DreamEvent:
+    kind: str
+    due: int
+    position: int | None = None
+    damage_start: int = 0
+    threshold: int = 0
+
+
+@dataclass
 class CombatSession:
     guild_id: int
     channel_id: int
@@ -1263,6 +1279,12 @@ class CombatSession:
     annihilated: bool = False
     encounter_sanity_done: bool = False
     annihilation_logs: list[str] = field(default_factory=list)
+    dream_hatched: bool = False
+    dream_boss_turns: int = 0
+    dream_last_action: int = -1
+    dream_result: str = ""
+    dream_events: list[DreamEvent] = field(default_factory=list)
+    dream_difficulty: int = 1
 
 
 class CombatLogEntry(str):
@@ -1287,6 +1309,8 @@ RAID_ENEMIES = {
               "fight": 0, "dodge": 0, "gun": 0, "luck": 50},
     "chimera": {"name": "실험키메라", "dex": 55, "con": 60, "str": 60, "size": 65,
                 "fight": 50, "dodge": 25, "gun": 0, "luck": 50},
+    "dream": {"name": "꿈꾸는 고치", "dex": 40, "con": 100, "str": 100, "size": 200,
+              "fight": 30, "dodge": 0, "gun": 0, "luck": 70, "pow": 120},
     "minion": {"name": "실험체", "dex": 35, "con": 30, "str": 20, "size": 20,
                "fight": 35, "dodge": 15, "gun": 0, "luck": 30},
 }
@@ -1370,6 +1394,7 @@ def end_combat_madness_turn(session: CombatSession, member: CombatParticipant) -
 
 
 def lock_compulsive_weapon(member: CombatParticipant, weapon: CombatWeapon) -> None:
+    member.last_used_weapon = (weapon.name, weapon.skill_reference)
     if member.madness == "강박" and member.compulsive_weapon is None:
         member.compulsive_weapon = (weapon.name, weapon.skill_reference)
 
@@ -1386,6 +1411,8 @@ def missing_compulsive_weapon(member: CombatParticipant) -> bool:
 def available_combat_weapon(session: CombatSession, index: int) -> bool:
     member = session.participants[session.turn_index]
     weapon = member.weapons[index]
+    if member.dream_forbidden == (weapon.name, weapon.skill_reference):
+        return member.madness == "강박" and member.compulsive_weapon == member.dream_forbidden
     if member.madness == "도주" or not compulsion_allows(member, weapon):
         return False
     if member.madness == "강박" and member.compulsive_weapon is not None:
@@ -1449,6 +1476,12 @@ def make_raid_enemy(enemy_id: str) -> CombatParticipant:
 
 
 def randomize_raid_enemy(member: CombatParticipant, player_count: int) -> None:
+    if member.enemy_id == "dream":
+        member.enemy_skills = dict(RAID_ENEMIES["dream"])
+        member.max_hp = max(60, 30 * player_count)
+        member.recovering = True
+        member.dream_angel = False
+        return
     if member.enemy_id != "chimera":
         return
     member.enemy_skills = {
@@ -1500,6 +1533,8 @@ async def combat_skill_value(member: CombatParticipant, skill: str) -> int | Non
 async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) -> list[CombatWeapon]:
     if not member.enemy_id:
         return await registry.get_combat_weapons(member.character_value, refresh=refresh)
+    if member.enemy_id == "dream":
+        return [CombatWeapon("비무장 · 그림자", "근접전 | 격투", "1d4")]
     if member.enemy_id == "minion":
         return [CombatWeapon("비무장 · 물어뜯기", "근접전 | 격투", "1d3")]
     if member.enemy_id == "chimera":
@@ -1530,7 +1565,7 @@ def combat_is_present(member: CombatParticipant) -> bool:
 
 
 def combat_is_active(member: CombatParticipant) -> bool:
-    return combat_is_present(member) and not member.unconscious
+    return combat_is_present(member) and not member.unconscious and not member.dream_asleep
 
 
 def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatParticipant, *, ignore_armor: bool = False) -> tuple[int, str]:
@@ -1549,7 +1584,7 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
         target.major_wound = True
         reopened = " · 【상처 재발 · 중상】"
     previous_hp = target.hp
-    target.hp = max(0, target.hp - damage)
+    target.hp = max(1 if target.enemy_id == "dream" else 0, target.hp - damage)
     broken_armor = ""
     if target.armor_boosted and raw_damage >= 5 and not ignore_armor:
         target.armor_boosted = False
@@ -1595,6 +1630,8 @@ def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: C
     modifier -= int(member.major_wound)
     modifier -= int(maintaining_combat_shock(session, member))
     modifier -= member.paralysis_stacks
+    if member.dream_blind and context in {"attack", "spell_attack"}:
+        modifier -= 1
     if member.madness == "심신성 장애" and context in {"attack", "defense", "spell_attack"}:
         modifier -= 1
     if member.madness == "떨림" and context == "attack" and weapon is not None and is_projectile_weapon(weapon):
@@ -1790,12 +1827,14 @@ def render_combat_field(session: CombatSession) -> str:
     members = [member for member in session.participants if combat_is_present(member)]
     if not members:
         return "--------\n참가자 없음\n--------"
-    positions = range(max(member.position for member in members), min(member.position for member in members) - 1, -1)
+    hazards = {event.position for event in session.dream_events if event.kind == "pit" and event.position is not None}
+    coordinates = [member.position for member in members] + list(hazards)
+    positions = range(max(coordinates), min(coordinates) - 1, -1)
     current = session.participants[session.turn_index]
     lines = [" ".join(
         member.field_symbol + (" ◀" if member is current else "")
         for member in members if member.position == position
-    ) for position in positions]
+    ) + (" ×" if position in hazards else "") for position in positions]
     return "--------\n" + "\n".join(lines) + "\n--------"
 
 
@@ -1835,6 +1874,10 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 엄폐 중' if member.cover_active and combat_is_active(member) else ''}"
             f"{' · 【' + combat_madness_label(member) + '】' if member.madness else ''}"
             f"{' · 지배 1턴' if member.domination_source is not None else ''}"
+            f"{' · 꿈에 잠김' if member.dream_asleep else ''}"
+            f"{' · 눈가리개' if member.dream_blind else ''}"
+            f"{' · 종이별' if member.dream_star else ''}"
+            f"{' · 잊힌 동작' if member.dream_forbidden else ''}"
             f"{' · 중상' if member.major_wound else ' · 임시처치' if member.temporarily_treated else ''}"
             f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
@@ -1855,6 +1898,8 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             enemy = ("\n상대: 연습용 허수아비 · HP·공격·회피·반격 없음\n모집자가 훈련 종료를 눌러 마칠 수 있어요."
                      if session.enemy_id == "dummy" else
                      "\n상대: 실험키메라 · 장갑 1 · 상태이상 면역\n시작 시 능력치·특수기 2개를 무작위로 정해요.\n10라운드부터 검은 안개 · 정신 판정 실패 시 피해")
+        if session.enemy_id == "dream":
+            enemy = "\n상대: 꿈꾸는 고치 · 2인 이상\n고치 3라운드 후 부화 · 총 12라운드 생존\n요정 장난 30% 추가 등장"
         body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
         return f"```text\n{body}\n```"
 
@@ -1878,6 +1923,15 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             target = session.participants[enemy.round_attack_target]
             if combat_is_active(target):
                 sections.append(f"【폭주 도약 준비】 {target.character_name}에게 시선 고정\n{enemy.round_attack_due}라운드 키메라 차례 시작에 덮쳐옵니다!\n거리를 넓히면 공격 패널티 +1 · 회피·반격 가능")
+    if session.enemy_id == "dream":
+        sections.append(f"꿈속 · {'검은 천사' if session.dream_hatched else '꿈꾸는 고치'} · 12라운드 끝까지 버티기")
+        for event in session.dream_events:
+            if event.kind == "pit":
+                sections.append("【바닥 없는 자리】 다음 보스 차례 전 × 위치에서 이동")
+            else:
+                title = "두드리는 소리" if event.kind == "pulse" else "눈꺼풀 아래"
+                remaining = max(0, event.threshold - (dream_boss(session).damage_received - event.damage_start))
+                sections.append(f"【{title}】 다음 보스 차례 전 {remaining} 피해 더 주면 {'취소' if event.kind == 'pulse' else '약화'}")
     if session.initiative_logs:
         sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
     sections.append("")
@@ -1961,6 +2015,8 @@ def render_combat_ranking(session: CombatSession) -> str:
 
 
 def render_combat_winner(session: CombatSession) -> str:
+    if session.enemy_id == "dream":
+        return render_dream_ending(session)
     if session.annihilated:
         return render_combat_annihilation(session)
     survivors = [member for member in session.participants if combat_is_active(member)]
@@ -2057,6 +2113,19 @@ async def resolve_combat_annihilation(session: CombatSession, caster: CombatPart
 
 
 async def finish_combat_if_decided(session: CombatSession) -> bool:
+    if session.enemy_id == "dream":
+        await maybe_hatch_dream(session)
+        players = any(not member.enemy_id and combat_is_active(member) for member in session.participants)
+        if players and not session.dream_result and not session.annihilated:
+            return False
+        if not players and not session.dream_result:
+            session.dream_result = "failure"
+        session.phase = "finished"
+        session.pending_attack = None
+        combat_sessions.pop(session.channel_id, None)
+        if session.message is not None:
+            await session.message.edit(content=render_dream_ending(session), view=None)
+        return True
     survivors = [member for member in session.participants if combat_is_active(member)]
     if session.mode == "레이드":
         boss_type = "chimera" if session.enemy_id == "chimera" else "dummy"
@@ -2162,6 +2231,9 @@ def advance_combat_turn(session: CombatSession) -> None:
     for _ in range(len(session.participants) * 2):
         position += 1
         if position >= len(order):
+            if session.enemy_id == "dream" and session.round_number >= 12:
+                session.dream_result = "success" if any(not p.enemy_id and combat_is_active(p) for p in session.participants) else "failure"
+                return
             session.round_number += 1
             if session.fog_start_round and session.round_number in CHIMERA_ROUND_WARNINGS:
                 append_combat_log(session, "【실험구역 경고】 " + CHIMERA_ROUND_WARNINGS[session.round_number])
@@ -2312,10 +2384,212 @@ async def process_chimera_encounter_sanity(session: CombatSession) -> bool:
     return False
 
 
+DREAM_ANGEL_PATTERNS = ("wings", "eye", "forget", "wings", "eye", "forget", "sleep", "drain", "wings", "eye", "sleep", "false_awakening")
+
+
+def dream_players(session: CombatSession, *, active: bool = False) -> list[CombatParticipant]:
+    return [p for p in session.participants if not p.enemy_id and (combat_is_active(p) if active else combat_is_present(p))]
+
+
+def dream_boss(session: CombatSession) -> CombatParticipant:
+    return next(p for p in session.participants if p.enemy_id == "dream")
+
+
+def render_dream_ending(session: CombatSession) -> str:
+    ending = ("천사가 다시 고치에 잠깁니다. 정신을 차려보니 손 안에 꽃 한송이만 남아있습니다."
+              if session.dream_result == "success" else
+              "꿈이 당신들을 삼킵니다. 비명을 삼키며 깨어났습니다.")
+    return "```text\n꿈꾸는 고치 · 종료\n" + ending + "\n\n" + render_combat_ranking(session)[:1400] + "\n```"
+
+
+async def maybe_hatch_dream(session: CombatSession) -> None:
+    if session.enemy_id != "dream" or session.dream_hatched or session.annihilated:
+        return
+    boss = dream_boss(session)
+    if boss.hp * 2 > boss.max_hp and session.round_number <= 3:
+        return
+    session.dream_hatched = boss.dream_angel = True
+    boss.character_name = "검은 천사"
+    boss.hp = boss.max_hp = 9999 + 1000 * session.dream_difficulty
+    boss.strength, boss.size, boss.constitution = 120, 220, 120
+    boss.enemy_skills.update(str=120, size=220, con=120, pow=120, dodge=40)
+    append_combat_log(session, "고치가 갈라집니다. 검은 천사가 눈을 뜹니다.")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+
+
+async def dream_log(session: CombatSession, text: str) -> None:
+    append_combat_log(session, text)
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+    session.briefing = "꿈이 흔들립니다."
+    await session.message.edit(content=render_combat_session(session), view=None)
+    await asyncio.sleep(0.7)
+
+
+async def dream_mental_wave(session: CombatSession, label: str, formula: str, *, sanity_check: bool = False) -> None:
+    for member in dream_players(session):
+        value = member.sanity if sanity_check else await combat_skill_value(member, "정신")
+        if value is None:
+            raise SheetError(f"{member.character_name}의 판정 값을 읽지 못했어요.")
+        roll, rolls, modifier = roll_combat_d100(member, 0 if sanity_check else -1, session=session, context="" if sanity_check else "spirit")
+        success = combat_success_rank(coc_combat_check_result(roll, value)) > 0
+        text = f"{member.character_name} · {label}\n{combat_roll_text(member, roll, rolls, modifier, session=session)} / {value} 【{'성공' if success else '실패'}】"
+        if not success:
+            amount, detail = roll_damage_formula(formula)
+            previous = member.sanity
+            loss = lose_combat_sanity(session, member, amount)
+            text += f"\n이성 손실 {detail} · 이성 {previous} → {member.sanity}"
+            session.last_attack = label
+            session.last_attack_events.append(f"{member.character_name} · 이성 -{loss}")
+        await dream_log(session, text)
+
+
+async def dream_due_events(session: CombatSession) -> None:
+    boss = dream_boss(session)
+    for event in session.dream_events[:]:
+        if event.due > session.dream_boss_turns:
+            continue
+        session.dream_events.remove(event)
+        if event.kind == "pit":
+            for member in dream_players(session):
+                if member.position != event.position:
+                    continue
+                raw, detail = roll_damage_formula("2d6")
+                damage, health = apply_combat_damage(member, raw, boss)
+                session.last_attack = "바닥 없는 자리"
+                session.last_attack_events = [f"{member.character_name} · {damage} 피해 · {health}"]
+                await dream_log(session, f"{detail}\n【바닥 없는 자리 · {damage} 피해】 {member.character_name} · {health}")
+                await check_combat_major_wound(session, member, damage)
+        elif event.kind in {"pulse", "eye"}:
+            countered = boss.damage_received - event.damage_start >= event.threshold
+            if event.kind == "pulse" and countered:
+                await dream_log(session, "【두드림 중단】 꿈속의 소리가 멎습니다.")
+            else:
+                formula = "1d3" if countered else "1d8"
+                await dream_mental_wave(session, "눈꺼풀 아래" if event.kind == "eye" else "안에서 두드리는 소리", formula)
+
+
+async def dream_fairy_trick(session: CombatSession) -> None:
+    players = dream_players(session, active=True)
+    if not players or random.random() >= 0.30:
+        return
+    kind = random.choice(("swap", "blind", "star"))
+    member = random.choice(players)
+    if kind == "swap":
+        if len(players) > 1:
+            first, second = random.sample(players, 2)
+            if first.position != second.position:
+                first.position, second.position = second.position, first.position
+            else:
+                first.position += random.choice((-1, 1))
+        else:
+            member.position += random.choice((-1, 1))
+        separate_combat_boss_position(session)
+        await dream_log(session, "【자리 바꾸기】 소녀가 자리를 바꿔놓습니다.\n“어라? 아까는 저쪽에 있었는데!”")
+    elif kind == "blind":
+        member.dream_blind = True
+        await dream_log(session, f"【눈 가리기】 {member.character_name} · 다음 공격 패널티 +1\n“누구게?” · 근거리 동료가 도움을 줄 수 있어요.")
+    else:
+        member.dream_star = random.randint(1, 4)
+        await dream_log(session, f"【작은 선물】 {member.character_name}의 손에 종이별이 들립니다.\n“선물이야. 꼭 쥐고 있어!” · 턴 종료 전 버리면 이성 손실을 막아요.")
+
+
+async def take_dream_turn(session: CombatSession) -> None:
+    if session.dream_last_action == session.turn_serial:
+        return
+    session.dream_last_action = session.turn_serial
+    session.dream_boss_turns += 1
+    await publish_combat_panel(session, None)
+    await dream_due_events(session)
+    if await finish_combat_if_decided(session):
+        return
+    await maybe_hatch_dream(session)
+    boss = dream_boss(session)
+    players = dream_players(session, active=True)
+    if not players:
+        await finish_combat_if_decided(session)
+        return
+    # Bound casters still get an escape attempt; holding someone prevents another attack.
+    if combat_is_shocked(session, boss):
+        effect = next(e for e in active_combat_statuses(session, boss) if "충격" in e.spec.kinds)
+        await attempt_combat_status_escape(session, boss, effect)
+        await CombatView(session).complete_attack_turn("고치가 꿈에 묶여 있습니다.")
+        return
+    if maintaining_combat_shock(session, boss):
+        await CombatView(session).complete_attack_turn("꿈이 멈춰 있습니다.")
+        return
+    threshold = 8 + 4 * session.dream_difficulty
+    if not session.dream_hatched:
+        pattern = {1: "fold", 2: "pit", 3: "pulse"}.get(session.round_number, "pulse")
+    else:
+        pattern = DREAM_ANGEL_PATTERNS[min(11, session.round_number - 1)]
+    if pattern == "fold":
+        positions = sorted({p.position for p in players})
+        destination = positions[0] if len(positions) > 1 else boss.position - 1
+        for p in players:
+            p.position = destination
+        await dream_log(session, "【접히는 꿈】 떨어져 있던 자리가 겹쳐집니다.\n위치 공격에 대비해 흩어지세요.")
+    elif pattern == "pit":
+        position = random.choice(players).position
+        session.dream_events.append(DreamEvent("pit", session.dream_boss_turns + 1, position=position))
+        await dream_log(session, "【바닥 없는 자리】 × 위치가 무너지기 시작합니다.\n다음 고치 차례 전에 × 위치에서 이동하세요.")
+    elif pattern in {"pulse", "eye"}:
+        session.dream_events.append(DreamEvent(pattern, session.dream_boss_turns + 1,
+                                             damage_start=boss.damage_received, threshold=threshold))
+        title = "안에서 두드리는 소리" if pattern == "pulse" else "눈꺼풀 아래"
+        await dream_log(session, f"【{title}】 정신 공격이 다가옵니다.\n다음 보스 차례 전 {threshold} 피해를 주면 {'취소' if pattern == 'pulse' else '약화'}돼요.")
+    elif pattern == "wings":
+        for p in players:
+            move_combat_position(session, session.participants.index(p), session.turn_index, 1)
+        await dream_log(session, "【잠든 날개의 움직임】 날갯짓에 모두 한 칸 밀려납니다.")
+    elif pattern == "forget":
+        for p in players:
+            p.dream_forbidden = p.last_used_weapon
+        await dream_log(session, "【잊힌 동작】 마지막 무기·주문을 잊어버립니다.\n다음 차례는 다른 행동을 골라 주세요.")
+    elif pattern == "sleep":
+        target = random.choice(players)
+        target.dream_asleep = True
+        target.cover_active = False
+        record_combat_elimination(session, target)
+        await dream_log(session, f"【꿈에 잠기는 몸】 {target.character_name}이 잠에 빠집니다.\n근거리 동료가 도움을 주면 깨어나요.")
+    elif pattern == "drain":
+        target = random.choice(players)
+        amount, _ = roll_damage_formula("2d4")
+        index = session.participants.index(target)
+        session.pending_attack = PendingCombatAttack(session.turn_index, index, 0, 0, 1, stage="defense")
+        session.briefing = f"【비어가는 윤곽】 {target.character_name} · 잃을 자원 {amount} 선택"
+        await session.message.edit(content=render_combat_session(session), view=DreamResourceView(session, amount))
+        return
+    elif pattern == "false_awakening":
+        await dream_log(session, "【거짓 각성】 익숙한 풍경이 다시 찢어집니다.")
+        await dream_mental_wave(session, "거짓 각성 · 이성", "1d8", sanity_check=True)
+    if await finish_combat_if_decided(session):
+        return
+    await dream_fairy_trick(session)
+    await CombatView(session).complete_attack_turn("꿈의 흔들림이 잦아듭니다.")
+
+
+async def end_dream_player_turn(session: CombatSession, member: CombatParticipant) -> None:
+    if member.enemy_id or member.dream_last_end == session.turn_serial:
+        return
+    member.dream_last_end = session.turn_serial
+    member.dream_blind = False
+    member.dream_forbidden = None
+    if member.dream_star:
+        amount = member.dream_star
+        member.dream_star = 0
+        previous = member.sanity
+        loss = lose_combat_sanity(session, member, amount)
+        append_combat_log(session, f"【종이별 · 이성 -{loss}】 {member.character_name} · {previous} → {member.sanity}")
+        session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+
+
 async def repost_combat_turn(session: CombatSession) -> None:
     # A stationary dummy has no player controls. Its turn still ticks ongoing
     # damage and escape checks before moving on, using the same round clock.
     while True:
+        if session.enemy_id == "dream":
+            if await finish_combat_if_decided(session):
+                return
         if await process_combat_black_fog(session):
             return
         previous_round = session.round_number
@@ -2330,6 +2604,9 @@ async def repost_combat_turn(session: CombatSession) -> None:
             if current.enemy_id:
                 current.actions_left = 1
             break
+        if current.enemy_id == "dream":
+            await take_dream_turn(session)
+            return
         if current.enemy_id in {"chimera", "minion"}:
             await publish_combat_panel(session, None)
             await take_chimera_turn(session)
@@ -2867,6 +3144,8 @@ async def prepare_combat_status_turn(session: CombatSession) -> bool:
             if combat_is_shocked(session, member) and not pending_combat_status_check(session, member):
                 session.briefing = f"{with_particle(member.character_name, '는', '은')} 충격 상태예요. 탈출 판정만 가능하고, 성공·실패 모두 턴이 끝나요."
             return False
+        if session.enemy_id == "dream":
+            await end_dream_player_turn(session, member)
         end_combat_madness_turn(session, member)
         end_combat_domination_turn(session, member)
         if await finish_combat_if_decided(session):
@@ -2940,7 +3219,7 @@ class CombatLobbyView(discord.ui.View):
                     await interaction.followup.send("이 모집은 이미 종료됐어요.", ephemeral=True)
                     return
                 player_count = sum(not member.enemy_id for member in session.participants)
-                minimum = 1 if session.mode == "레이드" else 2
+                minimum = 2 if session.enemy_id == "dream" else 1 if session.mode == "레이드" else 2
                 if player_count < minimum:
                     await interaction.followup.send(f"전투를 시작하려면 캐릭터가 {minimum}명 이상 참가해야 해요.", ephemeral=True)
                     return
@@ -2973,11 +3252,11 @@ class CombatLobbyView(discord.ui.View):
                     return
                 starting_sanities = {id(member): value for member, value in zip(sane_players, sanity_values)}
                 spirits = {}
-                if session.fog_start_round:
+                if session.fog_start_round or session.enemy_id == "dream":
                     fog_players = [member for member in session.participants if not member.enemy_id]
                     spirit_values = await asyncio.gather(*(combat_skill_value(member, "정신") for member in fog_players))
                     if any(value is None for value in spirit_values):
-                        await interaction.followup.send("검은 안개 판정에 필요한 정신 값을 읽지 못했어요. 시트를 확인하고 다시 시작해 주세요.", ephemeral=True)
+                        await interaction.followup.send("정신 판정 값을 읽지 못했어요. 시트를 확인하고 다시 시작해 주세요.", ephemeral=True)
                         return
                     spirits = {id(member): value for member, value in zip(fog_players, spirit_values)}
                 missing_health = [
@@ -3018,6 +3297,10 @@ class CombatLobbyView(discord.ui.View):
                     member.compulsive_weapon = None
                     member.fog_checked_round = 0
                     member.encounter_sanity_checked = False
+                    member.dream_asleep = member.dream_blind = False
+                    member.dream_forbidden = member.last_used_weapon = None
+                    member.dream_star = 0
+                    member.dream_last_end = -1
                     member.unconscious = False
                     member.forfeited = False
                     member.sacrificed = False
@@ -3046,6 +3329,9 @@ class CombatLobbyView(discord.ui.View):
                 session.round_number = 1
                 session.turn_index = 0
                 session.turn_serial = 1
+                if session.enemy_id == "dream":
+                    session.dream_difficulty = difficulty_count
+                    append_combat_log(session, "고치에서 뻗은 실이 당신들의 꿈을 붙잡고 있습니다.")
                 session.briefing = f"전투 시작! {session.participants[0].character_name}의 턴이에요!"
                 if await process_chimera_encounter_sanity(session):
                     return
@@ -3298,6 +3584,73 @@ class CombatWeaponSelect(discord.ui.Select):
                 await view.select_weapon(interaction, int(self.values[0]))
 
 
+def dream_help_targets(session: CombatSession) -> list[int]:
+    current = session.participants[session.turn_index]
+    return [i for i, member in enumerate(session.participants)
+            if not current.enemy_id and not member.enemy_id and member is not current and combat_is_present(member)
+            and (member.dream_asleep or member.dream_blind)
+            and combat_distance(session, session.turn_index, i) == "근거리"]
+
+
+class DreamUtilitySelect(discord.ui.Select):
+    def __init__(self, session: CombatSession) -> None:
+        options = [discord.SelectOption(label=trim_choice_name(f"{session.participants[i].character_name} · 도움 주기"), value=str(i),
+                                       description="잠 깨우기·눈가리개 제거 · 판정 없이 턴 종료") for i in dream_help_targets(session)]
+        if session.participants[session.turn_index].dream_star:
+            options.append(discord.SelectOption(label="종이별 버리기", value="star", description="이성 손실 방지 · 턴 종료"))
+        super().__init__(placeholder="꿈속에서 할 행동", options=options, row=3)
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.view.dream_utility(interaction, self.values[0])
+
+
+class DreamResourceView(CombatActionView):
+    def __init__(self, session: CombatSession, amount: int) -> None:
+        super().__init__(session)
+        self.amount = amount
+        target = session.participants[session.pending_attack.target_index]
+        for resource in ["마력", "이성", "HP"]:
+            if resource == "HP" and ((target.magic_points or 0) >= amount or (target.sanity or 0) > 0):
+                continue
+            button = discord.ui.Button(label=f"{resource} {amount} 소모", style=discord.ButtonStyle.secondary,
+                                       disabled=(resource == "마력" and (target.magic_points or 0) < amount) or (resource == "이성" and not target.sanity))
+            async def choose(interaction: discord.Interaction, selected: str = resource) -> None:
+                async with session.lock:
+                    if not await self.ensure_current(interaction):
+                        return
+                    attack = session.pending_attack
+                    if attack is None or attack.stage != "defense" or interaction.user.id != session.participants[attack.target_index].user_id:
+                        await interaction.response.send_message("해당 캐릭터만 선택할 수 있어요.", ephemeral=True)
+                        return
+                    member = session.participants[attack.target_index]
+                    if selected == "마력" and (member.magic_points or 0) < self.amount:
+                        await interaction.response.send_message("마력이 부족해요. 다른 자원을 선택해 주세요.", ephemeral=True)
+                        return
+                    if selected == "이성" and not member.sanity:
+                        await interaction.response.send_message("남은 이성이 없어요. 다른 자원을 선택해 주세요.", ephemeral=True)
+                        return
+                    await interaction.response.defer()
+                    attack.stage = "resolving"
+                    if selected == "마력":
+                        member.magic_points -= self.amount
+                        text = f"【비어가는 윤곽】 {member.character_name} · 마력 -{self.amount}"
+                    elif selected == "이성":
+                        loss = lose_combat_sanity(session, member, self.amount)
+                        text = f"【비어가는 윤곽】 {member.character_name} · 이성 -{loss}"
+                    else:
+                        damage, health = apply_combat_damage(member, self.amount, dream_boss(session))
+                        text = f"【비어가는 윤곽】 {member.character_name} · {damage} 피해 · {health}"
+                        await check_combat_major_wound(session, member, damage)
+                    await dream_log(session, text)
+                    if await finish_combat_if_decided(session):
+                        return
+                    await dream_fairy_trick(session)
+                    await CombatView(session).complete_attack_turn("윤곽의 일부를 잃었어요.")
+            button.callback = choose
+            self.add_item(button)
+
+
 class CombatView(CombatActionView):
     def __init__(self, session: CombatSession) -> None:
         super().__init__(session)
@@ -3344,6 +3697,8 @@ class CombatView(CombatActionView):
         )
         cover_button.callback = self.take_cover
         self.add_item(cover_button)
+        if session.enemy_id == "dream" and (dream_help_targets(session) or current.dream_star):
+            self.add_item(DreamUtilitySelect(session))
         if current.madness == "도주":
             for item in list(self.children):
                 if isinstance(item, discord.ui.Select):
@@ -3351,6 +3706,34 @@ class CombatView(CombatActionView):
                 elif getattr(item, "label", "") not in {"거리 넓히기", "기권", "레이드 종료", "훈련 종료"}:
                     item.disabled = True
             widen_button.disabled = False
+
+    async def dream_utility(self, interaction: discord.Interaction, value: str) -> None:
+        session = self.session
+        async with session.lock:
+            if not await self.ensure_current(interaction) or not await self.allow_normal_action(interaction):
+                return
+            current = session.participants[session.turn_index]
+            if interaction.user.id != combat_actor_user(session, current) or current.madness == "도주":
+                await interaction.response.send_message("현재 차례와 가능한 행동을 확인해 주세요.", ephemeral=True)
+                return
+            if value == "star":
+                if not current.dream_star:
+                    await interaction.response.send_message("버릴 종이별이 없어요.", ephemeral=True)
+                    return
+                current.dream_star = 0
+                text = f"【종이별 버리기】 {current.character_name}"
+            else:
+                index = int(value)
+                if index not in dream_help_targets(session):
+                    await interaction.response.send_message("도움을 줄 수 있는 근거리 동료가 없어요.", ephemeral=True)
+                    return
+                target = session.participants[index]
+                target.dream_asleep = target.dream_blind = False
+                text = f"【도움】 {current.character_name} → {target.character_name} · 잠·눈가리개 해제"
+            await interaction.response.defer()
+            append_combat_log(session, text)
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+            await self.complete_attack_turn("도움을 주고 차례를 마쳤어요.")
 
     async def release_bindings(self, interaction: discord.Interaction) -> None:
         session = self.session
@@ -3643,6 +4026,13 @@ class CombatView(CombatActionView):
                 await interaction.response.defer()
                 await self.repeat_compulsive_action(weapon)
                 return
+            if current.dream_forbidden == (weapon.name, weapon.skill_reference):
+                if current.madness == "강박":
+                    await interaction.response.defer()
+                    await self.repeat_compulsive_action(weapon)
+                else:
+                    await interaction.response.send_message("【잊힌 동작】 다음 차례에는 다른 행동을 골라 주세요.", ephemeral=True)
+                return
             if not combat_targets(session, weapon):
                 await interaction.response.send_message("지배 주문은 근거리에서만 사용할 수 있어요." if is_spell_weapon(weapon) and weapon.damage.strip() == "지배" else "근접전 무기는 근거리에서만 사용할 수 있어요.", ephemeral=True)
                 return
@@ -3692,6 +4082,12 @@ class CombatView(CombatActionView):
             return
         if current.madness == "강박" and current.compulsive_weapon is not None and (weapon.broken or not combat_targets(session, weapon) or (is_projectile_weapon(weapon) and not weapon.ammo)):
             await self.repeat_compulsive_action(weapon)
+            return
+        if current.dream_forbidden == (weapon.name, weapon.skill_reference):
+            if current.madness == "강박":
+                await self.repeat_compulsive_action(weapon)
+            else:
+                await interaction.followup.send("【잊힌 동작】 다른 행동을 골라 주세요.", ephemeral=True)
             return
         if is_spell_weapon(weapon):
             await self.prepare_spell(interaction, weapon_index, target_index)
@@ -4051,7 +4447,7 @@ class CombatView(CombatActionView):
         if not attack.hits and (not is_melee_weapon(weapon) or combat_is_shocked(session, target)):
             await self.complete_attack_turn("공격이 빗나갔어요.")
             return
-        needs_response = target is not current and target.enemy_id != "dummy" and not combat_is_shocked(session, target) and (is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp)
+        needs_response = target is not current and target.enemy_id != "dummy" and not (target.enemy_id == "dream" and not target.dream_angel) and not combat_is_shocked(session, target) and (is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp)
         if needs_response:
             attack.stage = "defense"
             if target.enemy_id:
@@ -4154,6 +4550,8 @@ class CombatView(CombatActionView):
             current.paralysis_skip_end_serial = -1
             append_combat_log(session, f"【마비 해제】 {current.character_name}")
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        if session.enemy_id == "dream":
+            await end_dream_player_turn(session, current)
         end_combat_madness_turn(session, current)
         end_combat_domination_turn(session, current)
         advance_combat_turn(session)
@@ -4646,7 +5044,7 @@ class CombatDefenseView(CombatActionView):
         defender = session.participants[attack.target_index]
         if (is_melee_weapon(weapon) and combat_is_active(session.participants[attack.attacker_index])
                 and not maintaining_combat_shock(session, defender)):
-            indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken and compulsion_allows(defender, item)]
+            indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken and compulsion_allows(defender, item) and defender.dream_forbidden != (item.name, item.skill_reference)]
             if len(indexes) > 1:
                 self.add_item(CombatCounterWeaponSelect(defender, indexes))
             elif indexes:
@@ -4664,7 +5062,7 @@ class CombatDefenseView(CombatActionView):
             await self.resolve(interaction, "반격")
             return
         defender = self.session.participants[attack.target_index]
-        indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken and compulsion_allows(defender, item)]
+        indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken and compulsion_allows(defender, item) and defender.dream_forbidden != (item.name, item.skill_reference)]
         index = indexes[0] if len(indexes) == 1 and "비무장" not in defender.weapons[indexes[0]].name else None
         await self.resolve(interaction, "반격", index)
 
@@ -4759,8 +5157,8 @@ class CombatDefenseView(CombatActionView):
                 await interaction.followup.send("판정과 피해를 진행하지 않았어요. 시트 연결과 값을 확인한 뒤 다시 눌러 주세요.", ephemeral=True)
             return
 
-        if counter_weapon is not None and not compulsion_allows(defender, counter_weapon):
-            session.briefing = "【강박】 고정된 무기로만 반격할 수 있어요."
+        if counter_weapon is not None and (not compulsion_allows(defender, counter_weapon) or defender.dream_forbidden == (counter_weapon.name, counter_weapon.skill_reference)):
+            session.briefing = "광기·잊힌 동작으로 사용할 수 없는 반격 무기예요."
             await session.message.edit(content=render_combat_session(session), view=CombatDefenseView(session))
             return
         if counter_weapon is not None:
@@ -4925,7 +5323,8 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
 @app_commands.guild_only()
 @app_commands.rename(raid="레이드")
 @app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy"),
-                           app_commands.Choice(name="실험키메라", value="chimera")])
+                           app_commands.Choice(name="실험키메라", value="chimera"),
+                           app_commands.Choice(name="꿈꾸는 고치", value="dream")])
 @app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.")
 async def combat_command(
     interaction: discord.Interaction,

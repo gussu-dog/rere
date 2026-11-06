@@ -1160,6 +1160,8 @@ class CombatParticipant:
     unconscious: bool = False
     forfeited: bool = False
     sacrificed: bool = False
+    doom_defeated: bool = False
+    doom_dead: bool = False
     status_effects: list[CombatStatusEffect] = field(default_factory=list)
     enemy_id: str = ""
     damage_dealt: int = 0
@@ -1186,6 +1188,10 @@ class CombatParticipant:
     field_symbol: str = ""
     paralysis_stacks: int = 0
     paralysis_skip_end_serial: int = -1
+
+    @property
+    def build(self) -> int:
+        return combat_build(self.strength, self.size)
 
     @property
     def paralyzed(self) -> bool:
@@ -1241,6 +1247,8 @@ class CombatSession:
     turn_order: list[int] = field(default_factory=list)
     fog_start_round: int = 0
     fog_processed_round: int = 0
+    annihilated: bool = False
+    annihilation_logs: list[str] = field(default_factory=list)
 
 
 class CombatLogEntry(str):
@@ -1425,7 +1433,7 @@ def randomize_raid_enemy(member: CombatParticipant, player_count: int) -> None:
         return
     member.enemy_skills = {
         "dex": random.randint(25, 85), "con": random.randint(30, 90),
-        "str": random.randint(30, 90), "size": random.randint(35, 95),
+        "str": random.randint(30, 90), "size": random.randint(50, 120),
         "fight": random.randint(30, 75), "dodge": random.randint(10, 50),
         "luck": random.randint(20, 80), "pow": random.randint(30, 90), "gun": 0,
     }
@@ -1475,8 +1483,8 @@ async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) ->
     if member.enemy_id == "minion":
         return [CombatWeapon("비무장 · 물어뜯기", "근접전 | 격투", "1d3")]
     if member.enemy_id == "chimera":
-        weapons = [CombatWeapon("비무장 · 발톱", "근접전 | 격투", "1d6"),
-                   CombatWeapon("덮치기", "근접전 | 격투", "1d8")]
+        weapons = [CombatWeapon("비무장 · 발톱", "근접전 | 격투", "1d6", damage_bonus="DB"),
+                   CombatWeapon("덮치기", "근접전 | 격투", "1d8", damage_bonus="DB")]
         specials = {
             "swallow": CombatWeapon("삼키기", "근접전 | 격투", "1d3", effects=[CombatStatusSpec(("충격",), "근접전")]),
             "poison": CombatWeapon("독 분사", "생체 공격", "1d3", effects=[CombatStatusSpec(("지속",), "건강")]),
@@ -1484,8 +1492,11 @@ async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) ->
             "charge": CombatWeapon("돌진", "근접전 | 격투", "1d6"),
             "burst": CombatWeapon("폭주 분출", "생체 공격", "1d6"),
         }
-        return weapons + [specials[key] for key in member.enemy_specials] + [
-            CombatWeapon("폭주 도약", "근접전 | 격투", "2d4")]
+        chosen = [specials[key] for key in member.enemy_specials]
+        for weapon in chosen:
+            if is_melee_weapon(weapon):
+                weapon.damage_bonus = "DB"
+        return weapons + chosen + [CombatWeapon("폭주 도약", "근접전 | 격투", "2d4", damage_bonus="DB")]
     return []
 
 
@@ -1495,17 +1506,17 @@ def combat_opponents(session: CombatSession, first: int, second: int) -> bool:
 
 
 def combat_is_present(member: CombatParticipant) -> bool:
-    return (member.enemy_id == "dummy" or member.hp > 0) and not member.forfeited and not member.sacrificed
+    return (member.enemy_id == "dummy" or member.hp > 0) and not member.forfeited and not member.sacrificed and not member.doom_defeated
 
 
 def combat_is_active(member: CombatParticipant) -> bool:
     return combat_is_present(member) and not member.unconscious
 
 
-def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatParticipant) -> tuple[int, str]:
+def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatParticipant, *, ignore_armor: bool = False) -> tuple[int, str]:
     raw_damage = damage
-    damage = max(0, damage - target.armor)
-    armor_text = f"장갑 {target.armor}: {raw_damage} → {damage} · " if target.armor else ""
+    damage = max(0, damage - (0 if ignore_armor else target.armor))
+    armor_text = f"장갑 {target.armor}: {raw_damage} → {damage} · " if target.armor and not ignore_armor else ""
     if target.enemy_id:
         target.damage_received += damage
         if source is not target:
@@ -1520,7 +1531,7 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
     previous_hp = target.hp
     target.hp = max(0, target.hp - damage)
     broken_armor = ""
-    if target.armor_boosted and raw_damage >= 5:
+    if target.armor_boosted and raw_damage >= 5 and not ignore_armor:
         target.armor_boosted = False
         target.armor = 1
         broken_armor = " · 【강화 장갑 파괴!】"
@@ -1738,6 +1749,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
             f"{' · 마력 ' + str(member.magic_points) if member.magic_points is not None else ''}"
             f"{' · 이성 ' + str(member.sanity) if member.sanity is not None else ''}"
+            f"{' · 크기 ' + str(member.size) + ' · 체구 ' + str(member.build) if member.enemy_id == 'chimera' else ''}"
             f"{' · 충격 면역' if member.enemy_id == 'chimera' else ''}"
             f"{' · 남은 행동 ' + str(member.actions_left) + '회' if member.enemy_id == 'chimera' and member is session.participants[session.turn_index] and member.actions_left else ''}"
             f"{' · ' + str(member.spawn_round) + '라운드부터 행동' if member.spawn_round > session.round_number else ''}"
@@ -1856,6 +1868,8 @@ def render_combat_ranking(session: CombatSession) -> str:
 
 
 def render_combat_winner(session: CombatSession) -> str:
+    if session.annihilated:
+        return render_combat_annihilation(session)
     survivors = [member for member in session.participants if combat_is_active(member)]
     if (len(session.participants) > 1 and len({member.hp for member in session.participants}) == 1
             and (not survivors or len(survivors) == len(session.participants))):
@@ -1896,6 +1910,57 @@ def render_combat_winner(session: CombatSession) -> str:
     else:
         summary = "공격 없이 전투를 종료했어요."
     return f"```text\n전투 종료\n\n{summary}\n\n{outcome}\n\n{ranking}\n```"
+
+
+def render_combat_annihilation(session: CombatSession) -> str:
+    results = []
+    for member in session.participants:
+        state = "사망" if member.doom_dead else "패배" if member.doom_defeated else f"생존 · HP {member.hp}" if combat_is_present(member) else "이전 탈락"
+        results.append(f"{member.character_name} · {state}")
+    logs = session.annihilation_logs[:]
+    title = "전투 종료 · 멸망\n망각의 파도가 모든 것을 삼켰습니다. 전장은 멸망했습니다."
+    while True:
+        details = "\n".join(logs)
+        body = title + "\n\n" + details + "\n\n최후의 상태\n" + "\n".join(results)
+        if len(body) <= 1850 or not logs:
+            return "```text\n" + body[:1850] + "\n```"
+        logs.pop(0)
+
+
+async def resolve_combat_annihilation(session: CombatSession, caster: CombatParticipant) -> None:
+    if session.annihilated:
+        return
+    session.annihilated = True
+    session.annihilation_logs = session.last_attack_events[:]
+    for member in session.participants:
+        if not combat_is_present(member) and member is not caster:
+            continue
+        if member.size <= 100:
+            member.hp = 0
+            member.doom_defeated = True
+            text = f"【멸망 · 패배】 {member.character_name} · 크기 {member.size}"
+        else:
+            roll, rolls, modifier = roll_combat_d100(member, session=session)
+            result = coc_combat_check_result(roll, member.constitution)
+            if combat_success_rank(result):
+                damage = (member.max_hp + 1) // 2
+                damage, health = apply_combat_damage(member, damage, caster, ignore_armor=True)
+                member.doom_dead = member.hp <= 0
+                member.doom_defeated = member.doom_dead
+                outcome = f"최대 HP 절반 · {damage} 피해 · {health}"
+            else:
+                member.hp = 0
+                member.doom_dead = member.doom_defeated = True
+                outcome = "사망"
+            text = (f"{member.character_name} · 건강 {combat_roll_text(member, roll, rolls, modifier, session=session)} / {member.constitution}\n"
+                    f"【{result}】 {outcome}")
+        member.cover_active = False
+        record_combat_elimination(session, member)
+        session.annihilation_logs.append(text)
+    session.phase = "finished"
+    session.pending_attack = None
+    combat_sessions.pop(session.channel_id, None)
+    await session.message.edit(content=render_combat_winner(session), view=None)
 
 
 async def finish_combat_if_decided(session: CombatSession) -> bool:
@@ -2402,6 +2467,21 @@ def maximum_damage_formula(formula: str) -> int:
     return total
 
 
+def combat_build(strength: int, size: int) -> int:
+    combined = strength + size
+    if combined <= 64:
+        return -2
+    if combined <= 84:
+        return -1
+    if combined <= 124:
+        return 0
+    if combined <= 164:
+        return 1
+    if combined <= 204:
+        return 2
+    return 3 + (combined - 205) // 80
+
+
 def damage_bonus_formula(strength: int, size: int) -> str:
     combined = strength + size
     if combined <= 64:
@@ -2800,6 +2880,7 @@ class CombatLobbyView(discord.ui.View):
                     member.unconscious = False
                     member.forfeited = False
                     member.sacrificed = False
+                    member.doom_defeated = member.doom_dead = False
                     member.status_effects = []
                     member.paralysis_stacks = 0
                     member.paralysis_skip_end_serial = -1
@@ -2813,6 +2894,7 @@ class CombatLobbyView(discord.ui.View):
                         append_combat_log(session,
                             f"【실험체 생성】 HP {member.max_hp} · 장갑 {member.armor} · 민첩 {member.dexterity} · "
                             f"근접전 {member.enemy_skills['fight']} · 회피 {member.enemy_skills['dodge']}\n"
+                            f"근력 {member.strength} · 크기 {member.size} · 체구 {member.build} · DB {damage_bonus_formula(member.strength, member.size)}\n"
                             f"습득한 특수기: {', '.join(CHIMERA_SPECIALS[key] for key in member.enemy_specials)} · 매 턴 행동 1d{member.action_dice_sides}회\n"
                             f"난이도 인원 {difficulty_count}명분 (일반 1 · 펄프 2)"
                         )
@@ -3545,10 +3627,13 @@ class CombatView(CombatActionView):
         caster = session.participants[session.turn_index]
         weapon = caster.weapons[weapon_index]
         try:
-            targets = combat_targets(session, weapon)
+            doom = weapon.damage.strip() == "멸망"
+            targets = [session.turn_index] if doom else combat_targets(session, weapon)
+            if doom:
+                target_index = session.turn_index
             if not targets:
                 raise SheetError("주문을 사용할 상대가 없어요.")
-            if caster.madness == "폭력성":
+            if caster.madness == "폭력성" and not doom:
                 target_index = targets[0]
             if target_index is None and len(targets) > 1:
                 await session.message.edit(content=render_combat_session(session, "주문 대상 선택"),
@@ -3559,14 +3644,15 @@ class CombatView(CombatActionView):
             target_index = targets[0] if target_index is None else target_index
             if target_index not in targets:
                 raise SheetError("주문 대상을 다시 선택해 주세요.")
-            target_index = await redirect_madness_attack(session, weapon, target_index)
+            if not doom:
+                target_index = await redirect_madness_attack(session, weapon, target_index)
             defender = session.participants[target_index]
-            spirit = await combat_skill_value(caster, "정신")
-            defense = await combat_skill_value(defender, "정신")
+            spirit = (caster.spirit or 0) if doom else await combat_skill_value(caster, "정신")
+            defense = 0 if doom else await combat_skill_value(defender, "정신")
             if spirit is None or defense is None:
                 raise SheetError("정신 대항에 필요한 정신 값을 읽지 못했어요.")
             if (not re.fullmatch(r"\d*[dD]\d+(?:[+-]\d+)?|\d+", weapon.damage.replace(" ", ""))
-                    and not (weapon.damage == "0" and weapon.effects)):
+                    and not (weapon.damage == "0" and weapon.effects) and not doom):
                 raise SheetError("주문의 피해식이나 효과를 먼저 적어 주세요.")
             deferred = {}
             costs = roll_spell_costs(weapon.spell_cost_text, deferred)
@@ -3578,6 +3664,10 @@ class CombatView(CombatActionView):
                 caster.sanity = await combat_skill_value(caster, "이성")
                 if caster.sanity is None:
                     raise SheetError("현재 이성 값을 읽지 못했어요.")
+            if doom and "정신" in costs and caster.spirit is None:
+                spirit = await combat_skill_value(caster, "정신")
+                if spirit is None:
+                    raise SheetError("주문 대가에 필요한 정신 값을 읽지 못했어요.")
             if costs.get("정신", 0) > spirit:
                 raise SheetError("주문 대가로 사용할 정신이 부족해요.")
             hp_cost = max(0, costs.get("마력", 0) - (caster.magic_points or 0))
@@ -3672,6 +3762,12 @@ class CombatView(CombatActionView):
             caster.spirit -= costs["정신"]
             spent.append(f"정신 {previous} → {caster.spirit}")
         lock_compulsive_weapon(caster, weapon)
+        if weapon.damage.strip() == "멸망":
+            session.last_attack = f"{caster.character_name} · {weapon.name}"
+            session.last_attack_events = ["대가: " + (" · ".join(spent) or "없음")]
+            append_combat_log(session, session.last_attack + "\n" + session.last_attack_events[0])
+            await resolve_combat_annihilation(session, caster)
+            return
         attack.skill_value = caster.spirit
         # Self-targeting isn't offered, but keep stored defense consistent with resource changes.
         if target is caster:

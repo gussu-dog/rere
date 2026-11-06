@@ -1999,7 +1999,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
                      if session.enemy_id == "dummy" else
                      "\n상대: 실험키메라 · 장갑 1 · 상태이상 면역\n시작 시 능력치·특수기 2개를 무작위로 정해요.\n10라운드부터 검은 안개 · 정신 판정 실패 시 피해")
         if session.enemy_id == "hunter":
-            enemy = "\n상대: 딜리아와 디안 · 라운드 제한 없음\n3라운드 종료 후 디안 난입 · 두 명 모두 쓰러뜨리면 승리"
+            enemy = "\n상대: 루베랄드의 칼날과 광기 · 라운드 제한 없음\n3라운드 종료 후 디안 난입 · 두 명 모두 쓰러뜨리면 승리"
         if session.enemy_id == "dream":
             enemy = "\n상대: 꿈꾸는 고치 · 2인 이상 · 상태이상 면역\n고치 3라운드 후 부화 · 총 12라운드 생존\n요정 장난 30% 추가 등장"
         body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
@@ -5955,7 +5955,7 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
 @app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy"),
                            app_commands.Choice(name="실험키메라", value="chimera"),
                            app_commands.Choice(name="꿈꾸는 고치", value="dream"),
-                           app_commands.Choice(name="딜리아와 디안", value="hunter")])
+                           app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter")])
 @app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.")
 async def combat_command(
     interaction: discord.Interaction,

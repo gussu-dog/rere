@@ -3152,10 +3152,12 @@ async def prepare_combat_status_turn(session: CombatSession) -> bool:
             return True
         previous_round = session.round_number
         advance_combat_turn(session)
+        if session.dream_result and await finish_combat_if_decided(session):
+            return True
+        session.briefing = f"행동할 수 없어 차례를 넘겨요. 이제 {session.participants[session.turn_index].character_name}의 턴이에요!"
+        await refresh_combat_turn_weapons(session)
         if session.round_number != previous_round:
             return False
-        session.briefing = f"기절 또는 전투불능으로 차례를 넘겨요. 이제 {session.participants[session.turn_index].character_name}의 턴이에요!"
-        await refresh_combat_turn_weapons(session)
     return session.phase == "finished"
 
 

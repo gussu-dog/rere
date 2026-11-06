@@ -103,7 +103,7 @@ class KitchenRaidTests(unittest.TestCase):
                 s.round_number += 1
                 s.turn_serial += 1
                 await k.take_turn(s)
-                self.assertEqual(s.kitchen_state.quality, 85)
+                self.assertEqual(s.kitchen_state.quality, 80)
                 self.assertFalse(s.kitchen_state.pot_warning)
                 self.assertEqual({k.enemy_kind(p) for p in s.participants if p.enemy_id and m.combat_is_present(p)}, {"noodle", "onion"})
         self.run_case(check)
@@ -134,7 +134,7 @@ class KitchenRaidTests(unittest.TestCase):
 
     def test_mistakes_reduce_condition_without_extra_hp_damage(self):
         async def check():
-            for action, penalty, hp in [("prep:3:손놀림", 6, 77), ("cool:민첩", 3, 77), ("season", 10, 80)]:
+            for action, penalty, hp in [("prep:3:손놀림", 8, 77), ("cool:민첩", 5, 77), ("season", 12, 80)]:
                 s = fixture()
                 s.participants[0].position = 1
                 s.kitchen_state.pot_warning = True
@@ -178,11 +178,11 @@ class KitchenRaidTests(unittest.TestCase):
             with patch.object(m.registry, "get_skill_value", AsyncMock(return_value=65)), patch.object(m, "roll_combat_d100", side_effect=[(99, [99], 0), (1, [1], 0)]), patch.object(m, "repost_combat_turn", AsyncMock()), patch.object(m, "refresh_combat_turn_weapons", AsyncMock()):
                 await k.use_action(s, interaction(s), "incident:salt:손놀림", s.turn_serial)
                 self.assertEqual(s.kitchen_state.incident, "salt")
-                self.assertEqual(s.kitchen_state.quality, 98)
+                self.assertEqual(s.kitchen_state.quality, 96)
                 self.assertEqual(s.turn_index, 1)
                 await k.use_action(s, interaction(s, 2), "incident:salt:손놀림", s.turn_serial)
                 self.assertFalse(s.kitchen_state.incident)
-                self.assertEqual(s.kitchen_state.quality, 98)
+                self.assertEqual(s.kitchen_state.quality, 100)
             self.assertEqual([p.hp for p in s.participants[:2]], [80, 80])
         self.run_case(check)
 
@@ -215,6 +215,41 @@ class KitchenRaidTests(unittest.TestCase):
             m.apply_combat_damage(target, 5, s.participants[0], weapon=weapon)
             self.assertEqual(s.kitchen_state.quality, 98-expected)
         m.combat_sessions.clear()
+
+    def test_action_quality_rewards_critical_successes_and_fumbles(self):
+        async def check():
+            cases = [("prep:3:손놀림", (3, 6, -8, -16)), ("incident:salt:손놀림", (5, 10, -4, -8)),
+                     ("cool:민첩", (5, 10, -5, -10)), ("season", (12, 24, -12, -24))]
+            for action, (reward, critical, failure, fumble) in cases:
+                for roll, delta in [(50, reward), (1, critical), (80, failure), (100, fumble), (10, reward), (25, reward)]:
+                    s = fixture()
+                    s.participants[0].position = 1
+                    state = s.kitchen_state
+                    state.quality = 50
+                    state.pot_warning = True
+                    state.seasoning = True
+                    state.incident = "salt"
+                    state.incident_due_round = 2
+                    serial = s.turn_serial
+                    with patch.object(m.registry, "get_skill_value", AsyncMock(return_value=65)), patch.object(m, "roll_combat_d100", return_value=(roll, [roll], 0)), patch.object(m, "roll_damage_formula", return_value=(1, "1d3 [1]")), patch.object(m, "repost_combat_turn", AsyncMock()), patch.object(m, "refresh_combat_turn_weapons", AsyncMock()):
+                        await k.use_action(s, interaction(s), action, serial)
+                    self.assertEqual(state.quality, 50+delta, (action, roll))
+                    self.assertEqual(s.participants[0].hp, 79 if roll in {80, 100} and action.startswith(("prep:", "cool:")) else 80)
+                    self.assertTrue(any(f"50 → {50+delta} ({delta:+d})" in str(line) for line in s.recent_logs))
+                    previous = state.quality
+                    await k.use_action(s, interaction(s), action, serial)
+                    self.assertEqual(state.quality, previous)
+                    if roll in {80, 100} and action.startswith("incident:"):
+                        self.assertEqual(state.incident, "salt")
+                    if roll in {80, 100} and action.startswith("cool:"):
+                        self.assertTrue(state.pot_warning)
+        self.run_case(check)
+
+    def test_quality_change_caps_and_reports_actual_delta(self):
+        state = k.KitchenState(quality=98)
+        self.assertEqual(k.change_quality(state, 24), "재료 상태 98 → 100 (+2)")
+        self.assertEqual(k.change_quality(state, -120), "재료 상태 100 → 0 (-100)")
+        self.assertEqual(k.change_quality(state, -8), "재료 상태 0 → 0 (+0)")
 
     def test_force_control_succeeds_or_fails_once(self):
         async def check():
@@ -318,7 +353,7 @@ class KitchenRaidTests(unittest.TestCase):
                 self.assertEqual(s.turn_index, 1)
                 await k.use_action(s, interaction(s, 2), "cool:민첩", s.turn_serial)
                 self.assertFalse(s.kitchen_state.pot_warning)
-            self.assertEqual(s.kitchen_state.quality, 97)
+            self.assertEqual(s.kitchen_state.quality, 100)
         self.run_case(check)
 
     def test_safe_preparation_and_missing_skill_do_not_damage_quality(self):
@@ -410,7 +445,7 @@ class KitchenRaidTests(unittest.TestCase):
             with patch.object(m, "publish_combat_panel", AsyncMock()), patch.object(m.CombatView, "complete_attack_turn", AsyncMock()), patch.object(m, "roll_damage_formula", return_value=(4, "1d6 [4]")):
                 await k.take_turn(s)
                 self.assertFalse(s.kitchen_state.pot_warning)
-                self.assertEqual(s.kitchen_state.quality, 85)
+                self.assertEqual(s.kitchen_state.quality, 80)
                 self.assertEqual(s.participants[0].hp, 76)
                 self.assertEqual(s.participants[1].hp, 76)
             for p in s.participants[:2]:

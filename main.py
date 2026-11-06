@@ -1154,6 +1154,7 @@ class CombatParticipant:
     sanity: int | None = None
     starting_sanity: int | None = None
     sanity_lost: int = 0
+    permanently_insane: bool = False
     madness: str = ""
     madness_long: bool = False
     madness_turns: int = 0
@@ -1176,6 +1177,7 @@ class CombatParticipant:
     domination_last_end: int = -1
     dream_asleep: bool = False
     dream_blind: bool = False
+    dream_betrayal: bool = False
     dream_forbidden: tuple[str, str] | None = None
     dream_star: int = 0
     dream_last_end: int = -1
@@ -1310,7 +1312,7 @@ RAID_ENEMIES = {
     "chimera": {"name": "실험키메라", "dex": 55, "con": 60, "str": 60, "size": 65,
                 "fight": 50, "dodge": 25, "gun": 0, "luck": 50},
     "dream": {"name": "꿈꾸는 고치", "dex": 40, "con": 100, "str": 100, "size": 200,
-              "fight": 30, "dodge": 0, "gun": 0, "luck": 70, "pow": 120},
+              "fight": 30, "dodge": 0, "gun": 0, "luck": 70, "pow": 120, "dream_attack": 80},
     "minion": {"name": "실험체", "dex": 35, "con": 30, "str": 20, "size": 20,
                "fight": 35, "dodge": 15, "gun": 0, "luck": 30},
 }
@@ -1340,6 +1342,8 @@ MADNESS_LINES = {
 
 
 def combat_madness_label(member: CombatParticipant) -> str:
+    if member.permanently_insane:
+        return "영구 광기 · 탈락"
     if not member.madness:
         return ""
     duration = "장기 광기" if member.madness_long else f"일시적 광기 · 남은 {member.madness_turns}턴"
@@ -1354,6 +1358,18 @@ def lose_combat_sanity(session: CombatSession, member: CombatParticipant, amount
     loss = min(member.sanity, max(0, amount))
     member.sanity -= loss
     member.sanity_lost += loss
+    if member.sanity == 0 and not member.enemy_id:
+        if not member.permanently_insane:
+            member.permanently_insane = True
+            member.madness = ""
+            member.madness_long = False
+            member.madness_turns = 0
+            member.compulsive_weapon = None
+            member.cover_active = False
+            record_combat_elimination(session, member)
+            append_combat_log(session, f"【영구 광기 · 탈락】 {member.character_name} · 이성 0")
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        return loss
     long_term = bool(member.starting_sanity and member.sanity_lost * 5 >= member.starting_sanity)
     if loss <= 0 or member.madness_long or (loss < 5 and not long_term):
         return loss
@@ -1422,6 +1438,8 @@ def available_combat_weapon(session: CombatSession, index: int) -> bool:
 
 async def redirect_madness_attack(session: CombatSession, weapon: CombatWeapon, target: int) -> int:
     current = session.participants[session.turn_index]
+    if current.dream_betrayal:
+        return target
     if current.madness == "폭력성":
         chosen = random.choice(combat_targets(session, weapon))
         append_combat_log(session, f"【폭력성】 대상: {session.participants[chosen].character_name}")
@@ -1525,6 +1543,8 @@ async def combat_skill_value(member: CombatParticipant, skill: str) -> int | Non
         return spec["fight"]
     if "사격" in skill:
         return spec["gun"]
+    if member.enemy_id == "dream" and skill == "꿈의 침식":
+        return spec["dream_attack"]
     if skill == "생체 공격":
         return spec["fight"]
     return 20
@@ -1534,7 +1554,10 @@ async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) ->
     if not member.enemy_id:
         return await registry.get_combat_weapons(member.character_value, refresh=refresh)
     if member.enemy_id == "dream":
-        return [CombatWeapon("비무장 · 그림자", "근접전 | 격투", "1d4")]
+        return [CombatWeapon("비무장 · 그림자", "근접전 | 격투", "1d4"),
+                CombatWeapon("접히는 실", "꿈의 침식", "1d4"),
+                CombatWeapon("날개의 잔향", "꿈의 침식", "1d6"),
+                CombatWeapon("뒤늦은 그림자", "꿈의 침식", "2d4")]
     if member.enemy_id == "minion":
         return [CombatWeapon("비무장 · 물어뜯기", "근접전 | 격투", "1d3")]
     if member.enemy_id == "chimera":
@@ -1561,7 +1584,7 @@ def combat_opponents(session: CombatSession, first: int, second: int) -> bool:
 
 
 def combat_is_present(member: CombatParticipant) -> bool:
-    return (member.enemy_id == "dummy" or member.hp > 0) and not member.forfeited and not member.sacrificed and not member.doom_defeated
+    return (member.enemy_id == "dummy" or member.hp > 0) and not member.forfeited and not member.sacrificed and not member.doom_defeated and not member.permanently_insane
 
 
 def combat_is_active(member: CombatParticipant) -> bool:
@@ -1683,7 +1706,7 @@ def spell_mana_sources(session: CombatSession, *, corpses: bool = False) -> list
     caster = session.participants[session.turn_index]
     if corpses:
         return [i for i, member in enumerate(session.participants) if not member.enemy_id
-                and member is not caster and member.hp <= 0 and not member.forfeited and not member.sacrificed
+                and member is not caster and (member.hp <= 0 or member.permanently_insane) and not member.forfeited and not member.sacrificed
                 and (member.magic_points or 0) > 0]
     return [i for i, member in enumerate(session.participants) if not member.enemy_id
             and member is not caster and session.mode == "레이드" and combat_is_active(member)
@@ -1839,12 +1862,15 @@ def render_combat_field(session: CombatSession) -> str:
 
 
 def combat_targets(session: CombatSession, weapon: CombatWeapon | None = None) -> list[int]:
-    broaden = (session.participants[session.turn_index].madness == "폭력성" or combat_is_controlled(session, session.turn_index)
+    current = session.participants[session.turn_index]
+    betrayal = current.dream_betrayal and not (weapon is not None and weapon.area)
+    broaden = (betrayal or current.madness == "폭력성" or combat_is_controlled(session, session.turn_index)
                or (weapon is not None and weapon.area))
     close_only = weapon is not None and (is_melee_weapon(weapon) or (is_spell_weapon(weapon) and weapon.damage.strip() == "지배"))
     return [index for index, member in enumerate(session.participants)
             if index != session.turn_index and combat_is_active(member)
             and (broaden or combat_opponents(session, session.turn_index, index))
+            and (not betrayal or (not member.enemy_id and not current.enemy_id))
             and (not close_only or combat_distance(session, session.turn_index, index) == "근거리")]
 
 
@@ -1872,10 +1898,11 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 독액에 발 묶임(이동 패널티 +1)' if member.snared else ''}"
             f"{' · 마비 ' + str(member.paralysis_stacks) + '중첩(패널티 +' + str(member.paralysis_stacks) + ')' if member.paralyzed else ''}"
             f"{' · 엄폐 중' if member.cover_active and combat_is_active(member) else ''}"
-            f"{' · 【' + combat_madness_label(member) + '】' if member.madness else ''}"
+            f"{' · 【' + combat_madness_label(member) + '】' if member.madness or member.permanently_insane else ''}"
             f"{' · 지배 1턴' if member.domination_source is not None else ''}"
             f"{' · 꿈에 잠김' if member.dream_asleep else ''}"
             f"{' · 눈가리개' if member.dream_blind else ''}"
+            f"{' · 뒤바뀐 얼굴(동료 공격)' if member.dream_betrayal else ''}"
             f"{' · 종이별' if member.dream_star else ''}"
             f"{' · 잊힌 동작' if member.dream_forbidden else ''}"
             f"{' · 중상' if member.major_wound else ' · 임시처치' if member.temporarily_treated else ''}"
@@ -1932,6 +1959,8 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
                 title = "두드리는 소리" if event.kind == "pulse" else "눈꺼풀 아래"
                 remaining = max(0, event.threshold - (dream_boss(session).damage_received - event.damage_start))
                 sections.append(f"【{title}】 다음 보스 차례 전 {remaining} 피해 더 주면 {'취소' if event.kind == 'pulse' else '약화'}")
+    if current.dream_betrayal:
+        sections.append("【뒤바뀐 얼굴】 이번 차례의 단일 공격은 동료에게만 가능 · 차례 넘기기로 버틸 수 있어요.")
     if session.initiative_logs:
         sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
     sections.append("")
@@ -1989,7 +2018,7 @@ def record_combat_elimination(session: CombatSession, member: CombatParticipant)
 
 def render_combat_ranking(session: CombatSession) -> str:
     if session.mode == "레이드":
-        lines = [f"{member.character_name} · 입힌 피해 {member.damage_dealt} · HP {member.hp}{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 기절' if member.unconscious else ''}"
+        lines = [f"{member.character_name} · 입힌 피해 {member.damage_dealt} · HP {member.hp}{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 영구 광기 · 탈락' if member.permanently_insane else ' · 기절' if member.unconscious else ''}"
                  for member in session.participants if not member.enemy_id]
         return "참가자 결과\n" + "\n".join(lines)
     active = sorted((member for member in session.participants if combat_is_active(member)), key=lambda member: member.hp, reverse=True)
@@ -2009,7 +2038,7 @@ def render_combat_ranking(session: CombatSession) -> str:
         lines.append(f"{position}위 {member.character_name} · HP {member.hp} · 기절")
     for position, member in enumerate(eliminated, start=len(active) + len(unconscious) + 1):
         rank = "공동 1위" if all_draw else f"{position}위"
-        state = "기권" if member.forfeited else "제물" if member.sacrificed else "HP 0 · 탈락"
+        state = "기권" if member.forfeited else "제물" if member.sacrificed else "영구 광기 · 탈락" if member.permanently_insane else "HP 0 · 탈락"
         lines.append(f"{rank} {member.character_name} · {state}")
     return "최종 순위\n" + "\n".join(lines)
 
@@ -2384,7 +2413,7 @@ async def process_chimera_encounter_sanity(session: CombatSession) -> bool:
     return False
 
 
-DREAM_ANGEL_PATTERNS = ("wings", "eye", "forget", "wings", "eye", "forget", "sleep", "drain", "wings", "eye", "sleep", "false_awakening")
+DREAM_ANGEL_PATTERNS = ("wings", "eye", "forget", "wings", "eye", "forget", "sleep", "drain", "faces", "eye", "sleep", "false_awakening")
 
 
 def dream_players(session: CombatSession, *, active: bool = False) -> list[CombatParticipant]:
@@ -2517,6 +2546,8 @@ async def take_dream_turn(session: CombatSession) -> None:
     if maintaining_combat_shock(session, boss):
         await CombatView(session).complete_attack_turn("꿈이 멈춰 있습니다.")
         return
+    physical_weapon = None
+    physical_all = False
     threshold = 8 + 4 * session.dream_difficulty
     if not session.dream_hatched:
         pattern = {1: "fold", 2: "pit", 3: "pulse"}.get(session.round_number, "pulse")
@@ -2527,7 +2558,8 @@ async def take_dream_turn(session: CombatSession) -> None:
         destination = positions[0] if len(positions) > 1 else boss.position - 1
         for p in players:
             p.position = destination
-        await dream_log(session, "【접히는 꿈】 떨어져 있던 자리가 겹쳐집니다.\n위치 공격에 대비해 흩어지세요.")
+        physical_weapon, physical_all = 1, True
+        await dream_log(session, "【접히는 꿈】 겹쳐진 꿈의 실이 몸을 조입니다.\n전원 1d4 공격 · 회피 가능")
     elif pattern == "pit":
         position = random.choice(players).position
         session.dream_events.append(DreamEvent("pit", session.dream_boss_turns + 1, position=position))
@@ -2540,11 +2572,25 @@ async def take_dream_turn(session: CombatSession) -> None:
     elif pattern == "wings":
         for p in players:
             move_combat_position(session, session.participants.index(p), session.turn_index, 1)
-        await dream_log(session, "【잠든 날개의 움직임】 날갯짓에 모두 한 칸 밀려납니다.")
+        physical_weapon, physical_all = 2, True
+        await dream_log(session, "【잠든 날개의 움직임】 모두 한 칸 밀려납니다.\n전원 1d6 공격 · 회피 가능")
     elif pattern == "forget":
         for p in players:
             p.dream_forbidden = p.last_used_weapon
-        await dream_log(session, "【잊힌 동작】 마지막 무기·주문을 잊어버립니다.\n다음 차례는 다른 행동을 골라 주세요.")
+        physical_weapon = 3
+        await dream_log(session, "【잊힌 동작】 마지막 무기·주문을 잊어버립니다.\n다음 차례는 다른 행동 · 그림자가 한 명을 공격해요. 2d4 · 회피 가능")
+    elif pattern == "faces":
+        target = random.choice(players)
+        value = await combat_skill_value(target, "정신")
+        if value is None:
+            raise SheetError("뒤바뀐 얼굴 판정에 필요한 정신 값을 읽지 못했어요.")
+        roll, rolls, modifier = roll_combat_d100(target, session=session, context="spirit")
+        succeeded = combat_success_rank(coc_combat_check_result(roll, value)) > 0
+        target.dream_betrayal = not succeeded
+        physical_weapon = 3
+        await dream_log(session, f"【뒤바뀐 얼굴】 {target.character_name} · 정신 {combat_roll_text(target, roll, rolls, modifier, session=session)} / {value} 【{'성공' if succeeded else '실패'}】\n"
+                        + ("동료의 얼굴이 제자리로 돌아옵니다." if succeeded else "다음 차례, 단일 공격은 동료에게만 가능 · 넘기기로 버틸 수 있어요.")
+                        + "\n그림자 2d4 공격 · 회피 가능")
     elif pattern == "sleep":
         target = random.choice(players)
         target.dream_asleep = True
@@ -2565,6 +2611,15 @@ async def take_dream_turn(session: CombatSession) -> None:
     if await finish_combat_if_decided(session):
         return
     await dream_fairy_trick(session)
+    if physical_weapon is not None:
+        targets = [i for i, p in enumerate(session.participants) if not p.enemy_id and combat_is_active(p)]
+        if targets:
+            if not physical_all:
+                targets = [random.choice(targets)]
+            first, *rest = targets
+            modifier = -1 if session.participants[first].cover_active else 0
+            await begin_raid_attack(session, session.turn_index, first, physical_weapon, modifier=modifier, remaining_targets=rest)
+            return
     await CombatView(session).complete_attack_turn("꿈의 흔들림이 잦아듭니다.")
 
 
@@ -2573,6 +2628,7 @@ async def end_dream_player_turn(session: CombatSession, member: CombatParticipan
         return
     member.dream_last_end = session.turn_serial
     member.dream_blind = False
+    member.dream_betrayal = False
     member.dream_forbidden = None
     if member.dream_star:
         amount = member.dream_star
@@ -3291,6 +3347,7 @@ class CombatLobbyView(discord.ui.View):
                     member.sanity = starting_sanities.get(id(member))
                     member.starting_sanity = member.sanity
                     member.sanity_lost = 0
+                    member.permanently_insane = False
                     member.madness = ""
                     member.madness_long = False
                     member.madness_turns = 0
@@ -3299,7 +3356,7 @@ class CombatLobbyView(discord.ui.View):
                     member.compulsive_weapon = None
                     member.fog_checked_round = 0
                     member.encounter_sanity_checked = False
-                    member.dream_asleep = member.dream_blind = False
+                    member.dream_asleep = member.dream_blind = member.dream_betrayal = False
                     member.dream_forbidden = member.last_used_weapon = None
                     member.dream_star = 0
                     member.dream_last_end = -1
@@ -3331,6 +3388,11 @@ class CombatLobbyView(discord.ui.View):
                 session.round_number = 1
                 session.turn_index = 0
                 session.turn_serial = 1
+                for member in session.participants:
+                    if not member.enemy_id and member.sanity == 0:
+                        lose_combat_sanity(session, member, 0)
+                if await finish_combat_if_decided(session):
+                    return
                 if session.enemy_id == "dream":
                     session.dream_difficulty = difficulty_count
                     append_combat_log(session, "고치에서 뻗은 실이 당신들의 꿈을 붙잡고 있습니다.")

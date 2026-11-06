@@ -2413,9 +2413,11 @@ async def attempt_combat_status_escape(session: CombatSession, member: CombatPar
     if succeeded:
         member.status_effects.remove(effect)
     label = "·".join(effect.spec.kinds)
+    requirement = f" · {status_escape_label(effect.spec)} 이상 필요" if effect.spec.escape_difficulty > 1 else ""
     append_combat_log(session,
+        f"{member.character_name} · {label} 해제{requirement}\n"
         f"{skill} 주사위 {combat_roll_text(member, roll, rolls, modifier, session=session)} / {value}\n"
-        f"【{label} 해제 {'성공' if succeeded else '실패'}】 {member.character_name} · 필요 {status_escape_label(effect.spec)}"
+        f"【{result} · 해제 {'성공' if succeeded else '실패'}】"
     )
     session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
     return succeeded

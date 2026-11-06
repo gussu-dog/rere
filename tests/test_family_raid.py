@@ -234,6 +234,37 @@ class FamilyRaidTests(unittest.TestCase):
 
         self.run_case(check_recovery)
 
+    def test_pulp_barrier_bonus_applies_to_spawn_repair_and_drain(self):
+        async def check_pulp():
+            for count in range(4):
+                session = fixture()
+                for member in session.participants[:count]:
+                    member.is_pulp = True
+                m.spawn_family_mage(session)
+                mage = session.participants[4]
+                self.assertEqual(mage.mana_barrier, 40 + 10 * count)
+                self.assertEqual(mage.mana_barrier_max, 40 + 10 * count)
+
+            session = fixture()
+            session.participants[0].is_pulp = True
+            m.spawn_family_mage(session)
+            mage = session.participants[4]
+            session.participants[0].forfeited = True
+            session.turn_index = 4
+            mage.mana_barrier = 0
+            mage.barrier_rebuild = True
+            with patch.object(m, "choose_family_spell", return_value=("barrage", 1)), patch.object(m, "begin_raid_attack", AsyncMock()):
+                await m.take_family_turn(session)
+            self.assertEqual(mage.mana_barrier, 50)
+            session.participants[0].forfeited = False
+            mage.mana_barrier = 49
+            session.pending_attack = m.PendingCombatAttack(4, 0, 0, 95, 1, stage="defense", family_spell="drain", spell_result="극단적 성공", spell_defense_value=65)
+            with patch.object(m, "roll_combat_d100", return_value=(99, [99], 0)), patch.object(m.random, "randint", return_value=4), patch.object(m.CombatView, "complete_attack_turn", AsyncMock()):
+                await m.resolve_family_spell(session)
+            self.assertEqual(mage.mana_barrier, 50)
+
+        self.run_case(check_pulp)
+
     def test_complete_battles(self):
         self.run_case(simulate)
 

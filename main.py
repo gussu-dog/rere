@@ -1193,6 +1193,7 @@ class CombatParticipant:
     damage_received: int = 0
     armor: int = 0
     mana_barrier: int = 0
+    mana_barrier_max: int = 40
     barrier_hits: int = 0
     barrier_rebuild: bool = False
     silenced: bool = False
@@ -5550,6 +5551,8 @@ def spawn_family_mage(session: CombatSession) -> None:
     mage.dexterity, mage.strength, mage.constitution, mage.size = spec["dex"], spec["str"], spec["con"], spec["size"]
     mage.spirit = 95
     mage.hp = mage.max_hp
+    mage.mana_barrier_max = 40 + 10 * sum(p.is_pulp for p in session.participants if not p.enemy_id)
+    mage.mana_barrier = mage.mana_barrier_max
     mage.weapons = [CombatWeapon("비무장", "근접전 | 격투", "1d3"), CombatWeapon("마력탄", "마법", "1d6")]
     mage.position = max((p.position for p in session.participants if combat_is_present(p)), default=0) + 2
     mage.field_symbol = "◆"
@@ -5588,7 +5591,7 @@ def choose_family_spell(session: CombatSession, mage: CombatParticipant, targets
         weights["pit"] += 3
     if any(session.participants[i].hp * 3 <= session.participants[i].max_hp for i in targets):
         weights["barrage"] += 5
-    if mage.mana_barrier < 25 or (mage.magic_points or 0) < 8:
+    if mage.mana_barrier * 40 < 25 * mage.mana_barrier_max or (mage.magic_points or 0) < 8:
         weights["drain"] += 6
     if casters:
         weights["silence"] = 5 + 3 * any(session.participants[i].last_used_weapon and session.participants[i].last_used_weapon[1] == "주문" for i in casters)
@@ -5716,10 +5719,10 @@ async def take_family_turn(session: CombatSession) -> None:
                 return
             continue
         if op["kind"] == "rebuild":
-            actor.mana_barrier = 40
+            actor.mana_barrier = actor.mana_barrier_max
             actor.barrier_hits = 0
             actor.barrier_rebuild = False
-            await show_raid_event(session, "【마나장벽 복구】 내구도 40 · 디안이 주문을 이어갑니다.")
+            await show_raid_event(session, f"【마나장벽 복구】 내구도 {actor.mana_barrier_max} · 디안이 주문을 이어갑니다.")
             continue
         if op["kind"] == "recharge":
             actor.magic_points = min(19, (actor.magic_points or 0) + 5)
@@ -5809,7 +5812,7 @@ async def resolve_family_spell(session: CombatSession) -> None:
             amount = min(target.magic_points or 0, random.randint(1, 4))
             target.magic_points = (target.magic_points or 0) - amount
             source.magic_points = min(19, (source.magic_points or 0) + amount)
-            source.mana_barrier = min(40, source.mana_barrier + amount)
+            source.mana_barrier = min(source.mana_barrier_max, source.mana_barrier + amount)
             await show_raid_event(session, f"【마력 약탈】 {target.character_name} 마력 -{amount} · 마나장벽 {source.mana_barrier}")
         elif key == "charm":
             apply_combat_domination(session, attack)

@@ -23,6 +23,7 @@ def fixture():
 async def check():
     s = fixture()
     h = s.participants[3]
+    assert h.max_hp == 30 and h.hp == 30
     h.hp = 7
     h.paralysis_stacks = 1
     s.round_number = 3
@@ -161,18 +162,18 @@ async def check_spells():
     s.turn_serial = 9
     s.participants[4].mana_barrier = 0
     s.participants[4].barrier_rebuild = True
-    with patch.object(m, 'publish_combat_panel', AsyncMock()), patch.object(m.CombatView, 'complete_attack_turn', AsyncMock()) as complete, patch.object(m, 'begin_raid_attack', AsyncMock()) as attack:
+    with patch.object(m, 'publish_combat_panel', AsyncMock()), patch.object(m.CombatView, 'complete_attack_turn', AsyncMock()) as complete, patch.object(m, 'begin_raid_attack', AsyncMock()) as attack, patch.object(m, 'choose_family_spell', return_value=('barrage', 0)):
         await m.take_family_turn(s)
-        assert s.participants[4].mana_barrier == 20 and (not s.participants[4].barrier_rebuild)
-        complete.assert_awaited_once()
-        attack.assert_not_awaited()
+        assert s.participants[4].mana_barrier == 40 and (not s.participants[4].barrier_rebuild)
+        complete.assert_not_awaited()
+        attack.assert_awaited_once()
     s = fixture()
     m.spawn_family_mage(s)
     s.participants[4].position = 3
     m.move_combat_position(s, 0, 4, -1)
     m.move_combat_position(s, 0, 4, -1)
     assert s.participants[0].position == 2 and m.combat_distance(s, 0, 4) == '근거리'
-    print('PASS: all 8 spells, poison resistance/damage, silence, charm, independent shock and caster penalty, drain, warnings, barrage, full-turn barrier rebuild, actual one-step movement')
+    print('PASS: all 8 spells, poison resistance/damage, silence, charm, independent shock and caster penalty, drain, warnings, barrage, barrier restoration with same-turn attack, actual one-step movement')
 import unittest
 
 class FamilyRaidTests(unittest.TestCase):
@@ -191,6 +192,20 @@ class FamilyRaidTests(unittest.TestCase):
 
     def test_phases_barrier_and_ai(self):
         self.run_case(check)
+
+    def test_field_marks_follow_identity_and_expire(self):
+        session = fixture()
+        m.initialize_combat_field(session)
+        session.participants[0].character_name = session.participants[1].character_name = "동명이인"
+        session.family_events = [{"kind": "mark", "target": 1, "name": "검은 낙인", "due": 1}]
+        field = m.render_combat_field(session)
+        self.assertIn("②※", field)
+        self.assertNotIn("①※", field)
+        session.participants[1].position = 3
+        self.assertIn("②※", m.render_combat_field(session).splitlines()[1])
+        session.family_events.clear()
+        self.assertNotIn("※", m.render_combat_field(session))
+        m.combat_sessions.clear()
 
     def test_complete_battles(self):
         self.run_case(simulate)

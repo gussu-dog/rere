@@ -1519,7 +1519,7 @@ def make_raid_enemy(enemy_id: str) -> CombatParticipant:
 def randomize_raid_enemy(member: CombatParticipant, player_count: int) -> None:
     if member.enemy_id in {"hunter", "mage"}:
         member.enemy_skills = dict(RAID_ENEMIES[member.enemy_id])
-        member.max_hp = 15 if member.enemy_id == "hunter" else 8
+        member.max_hp = 30 if member.enemy_id == "hunter" else 8
         member.magic_points = 17 if member.enemy_id == "hunter" else 19
         if member.enemy_id == "mage":
             member.mana_barrier = 40
@@ -1921,14 +1921,17 @@ def render_combat_field(session: CombatSession) -> str:
         return "--------\n참가자 없음\n--------"
     hazards = {event.position for event in session.dream_events if event.kind == "pit" and event.position is not None}
     hazards.update(event["position"] for event in session.family_events if event["kind"] == "pit")
-    coordinates = [member.position for member in members] + list(hazards)
+    marked = [session.participants[event["target"]] for event in session.family_events if event["kind"] == "mark"]
+    marked_ids = {id(member) for member in marked}
+    empty_marks = {member.position for member in marked if not combat_is_present(member)}
+    coordinates = [member.position for member in members] + list(hazards) + list(empty_marks)
     positions = range(max(coordinates), min(coordinates) - 1, -1)
     current = session.participants[session.turn_index]
     lines = [" ".join(
-        member.field_symbol + (" ◀" if member is current else "")
+        member.field_symbol + ("※" if id(member) in marked_ids else "") + (" ◀" if member is current else "")
         for member in members if member.position == position
-    ) + (" ×" if position in hazards else "") for position in positions]
-    return "--------\n" + "\n".join(lines) + "\n--------"
+    ) + (" ×" if position in hazards else "") + (" ※" if position in empty_marks else "") for position in positions]
+    return "--------\n" + "\n".join(lines) + ("\n※ 검은 낙인" if marked else "") + "\n--------"
 
 
 def combat_targets(session: CombatSession, weapon: CombatWeapon | None = None) -> list[int]:
@@ -2040,7 +2043,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
                         "딜리아가 디안과 교전 중 · 공투 중에도 딜리아를 공격할 수 있어요." if combat_is_present(mage) else "디안 탈락 · 딜리아와 마지막 결전")
         for event in session.family_events:
             sections.append(f"【{event['name']} 예고】 다음 디안 차례에 발동 · " +
-                            (f"{session.participants[event['target']].character_name}에게서 떨어지세요." if event['kind'] == 'mark' else f"위치 {event['position']}에서 이동하세요."))
+                            (f"{session.participants[event['target']].field_symbol}※ {session.participants[event['target']].character_name}에게서 떨어지세요." if event['kind'] == 'mark' else f"위치 {event['position']}에서 이동하세요."))
     if current.dream_betrayal:
         sections.append("【뒤바뀐 얼굴】 근거리의 가장 가까운 동료에게 자동 맨손 공격 · 동료가 없으면 해제")
     if session.initiative_logs:
@@ -5672,7 +5675,7 @@ async def take_family_turn(session: CombatSession) -> None:
                 session.family_ops.append({"kind": "hazard", "event": event})
         if actor.barrier_rebuild:
             session.family_ops.append({"kind": "rebuild"})
-        elif (actor.magic_points or 0) < 2:
+        if (actor.magic_points or 0) < 2:
             session.family_ops.append({"kind": "recharge"})
         else:
             key, target = choose_family_spell(session, actor, targets)
@@ -5707,10 +5710,10 @@ async def take_family_turn(session: CombatSession) -> None:
                 return
             continue
         if op["kind"] == "rebuild":
-            actor.mana_barrier = 20
+            actor.mana_barrier = 40
             actor.barrier_hits = 0
             actor.barrier_rebuild = False
-            await show_raid_event(session, "【마나장벽 재생】 내구도 20 · 디안은 공격하지 않습니다.")
+            await show_raid_event(session, "【마나장벽 복구】 내구도 40 · 디안이 주문을 이어갑니다.")
             continue
         if op["kind"] == "recharge":
             actor.magic_points = min(19, (actor.magic_points or 0) + 5)
@@ -5724,7 +5727,7 @@ async def take_family_turn(session: CombatSession) -> None:
                      "position": session.participants[target].position, "due": session.family_mage_turns + 1}
             session.family_events.append(event)
             await show_raid_event(session, f"【{event['name']} 예고】 다음 디안 차례에 발동!\n" +
-                                  (f"{session.participants[target].character_name}에게서 떨어지세요." if key == "mark" else f"위치 {event['position']}에서 이동하세요."))
+                                  (f"{session.participants[target].field_symbol}※ {session.participants[target].character_name}에게서 떨어지세요." if key == "mark" else f"위치 {event['position']}에서 이동하세요."))
             continue
         if key == "barrage":
             pool = family_targets(session, actor)

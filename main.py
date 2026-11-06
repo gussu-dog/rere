@@ -1783,7 +1783,7 @@ def end_combat_domination_turn(session: CombatSession, member: CombatParticipant
 def apply_combat_domination(session: CombatSession, attack: PendingCombatAttack) -> None:
     caster = session.participants[attack.attacker_index]
     target = session.participants[attack.target_index]
-    if target.enemy_id == "chimera":
+    if target.enemy_id in {"chimera", "dream"}:
         append_combat_log(session, f"【지배 면역】 {target.character_name}")
         session.last_attack_events.append(f"{target.character_name} · 지배 면역")
         session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -1890,7 +1890,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 마력 ' + str(member.magic_points) if member.magic_points is not None else ''}"
             f"{' · 이성 ' + str(member.sanity) if member.sanity is not None else ''}"
             f"{' · 크기 ' + str(member.size) + ' · 체구 ' + str(member.build) if member.enemy_id == 'chimera' else ''}"
-            f"{' · 상태이상 면역' if member.enemy_id == 'chimera' else ''}"
+            f"{' · 상태이상 면역' if member.enemy_id in {'chimera', 'dream'} else ''}"
             f"{' · 남은 행동 ' + str(member.actions_left) + '회' if member.enemy_id == 'chimera' and member is session.participants[session.turn_index] and member.actions_left else ''}"
             f"{' · ' + str(member.spawn_round) + '라운드부터 행동' if member.spawn_round > session.round_number else ''}"
             f"{' · 특수기 ' + '·'.join(CHIMERA_SPECIALS[key] for key in member.enemy_specials) if member.enemy_specials else ''}"
@@ -1926,7 +1926,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
                      if session.enemy_id == "dummy" else
                      "\n상대: 실험키메라 · 장갑 1 · 상태이상 면역\n시작 시 능력치·특수기 2개를 무작위로 정해요.\n10라운드부터 검은 안개 · 정신 판정 실패 시 피해")
         if session.enemy_id == "dream":
-            enemy = "\n상대: 꿈꾸는 고치 · 2인 이상\n고치 3라운드 후 부화 · 총 12라운드 생존\n요정 장난 30% 추가 등장"
+            enemy = "\n상대: 꿈꾸는 고치 · 2인 이상 · 상태이상 면역\n고치 3라운드 후 부화 · 총 12라운드 생존\n요정 장난 30% 추가 등장"
         body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
         return f"```text\n{body}\n```"
 
@@ -3080,7 +3080,7 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
 
 
 def apply_combat_weapon_statuses(session: CombatSession, attacker: CombatParticipant, target: CombatParticipant, weapon: CombatWeapon) -> None:
-    if target.enemy_id == "chimera":
+    if target.enemy_id in {"chimera", "dream"}:
         if weapon.effects:
             labels = "·".join(dict.fromkeys(kind for spec in weapon.effects for kind in spec.kinds))
             text = f"【상태이상 면역】 {target.character_name} · {labels}"
@@ -3120,7 +3120,7 @@ async def apply_combat_hit_effects(session: CombatSession, attacker: CombatParti
         return
     source_index = next(i for i, item in enumerate(session.participants) if item is attacker)
     target_index = next(i for i, item in enumerate(session.participants) if item is target)
-    if target.enemy_id == "chimera" and weapon.effects:
+    if target.enemy_id in {"chimera", "dream"} and weapon.effects:
         apply_combat_weapon_statuses(session, attacker, target, weapon)
         weapon = replace(weapon, effects=[])
 

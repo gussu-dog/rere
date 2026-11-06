@@ -1146,6 +1146,16 @@ class CombatParticipant:
     temporarily_treated: bool = False
     spirit: int | None = None
     sanity: int | None = None
+    starting_sanity: int | None = None
+    sanity_lost: int = 0
+    madness: str = ""
+    madness_long: bool = False
+    madness_turns: int = 0
+    madness_last_start: int = -1
+    madness_last_end: int = -1
+    madness_skip_end: int = -1
+    madness_knockout: bool = False
+    compulsive_weapon: tuple[str, str] | None = None
     fog_checked_round: int = 0
     unconscious: bool = False
     forfeited: bool = False
@@ -1263,6 +1273,118 @@ CHIMERA_SPECIAL_DETAILS = {
     "tail": "1d4 피해 · 명중하면 대상을 반대 방향으로 한 칸 밀어냄",
     "charge": "민첩 판정으로 근거리까지 돌진 · 성공하면 1d6 공격, 실패하면 이동 후 턴 종료",
 }
+MADNESS_LINES = {
+    "심신성 장애": ("팔다리가 남의 것처럼 움직입니다.", "몸 안에서 누군가 힘줄을 잡아당깁니다.", "움직일 때마다 뼈가 뒤틀리는 느낌이 듭니다."),
+    "폭력성": ("숨 쉬는 것들이 모두 적으로 보입니다.", "누군가 쓰러져야 이 소리가 멎을 것 같습니다.", "동료의 얼굴 위로 적의 얼굴이 겹쳐집니다."),
+    "편집증": ("다가오는 손이 목을 조르려는 것 같습니다.", "동료들이 당신 몰래 웃고 있습니다.", "도와주겠다는 말 뒤에 살의가 들립니다."),
+    "기절": ("어둠 속에서 당신의 몸이 멀어집니다.", "누군가 당신의 눈꺼풀을 안에서 누릅니다.", "깨어나야 합니다. 몸이 말을 듣지 않습니다."),
+    "도주": ("등 뒤에서 무언가 입을 벌립니다.", "멈추면 잡힙니다. 당신은 알고 있습니다.", "가까이 있는 것들이 당신을 집어삼킬 겁니다."),
+    "발작적 행동": ("피부 아래의 무언가를 꺼내야 합니다.", "몸 안에서 긁는 소리가 멎지 않습니다.", "당신의 손이 낯선 명령에 움직입니다."),
+    "강박": ("같은 일을 반복해야 무언가 깨어나지 않습니다.", "그만두는 순간 그것이 들어옵니다.", "한 번 더. 아직 끝나지 않았습니다."),
+    "감각 왜곡": ("동료의 목소리가 적의 입에서 들립니다.", "분명 적이었습니다. 눈을 깜빡이기 전까지는.", "얼굴들이 제자리를 바꿔 달라붙습니다."),
+    "집중 붕괴": ("생각 사이로 낯선 목소리가 스며듭니다.", "당신의 기억을 누군가 뒤지고 있습니다.", "머릿속에서 당신 아닌 누군가가 생각합니다."),
+    "떨림": ("손끝에 매달린 무언가가 팔을 흔듭니다.", "손이 떨립니다. 그림자는 움직이지 않습니다.", "손가락이 당신 뜻과 반대로 꺾이려 합니다."),
+}
+
+
+def combat_madness_label(member: CombatParticipant) -> str:
+    if not member.madness:
+        return ""
+    duration = "장기 광기" if member.madness_long else f"일시적 광기 · 남은 {member.madness_turns}턴"
+    return f"{member.madness} · {duration}"
+
+
+def lose_combat_sanity(session: CombatSession, member: CombatParticipant, amount: int) -> int:
+    if member.sanity is None:
+        raise SheetError("현재 이성 값을 읽지 못했어요.")
+    if member.starting_sanity is None:
+        member.starting_sanity = member.sanity
+    loss = min(member.sanity, max(0, amount))
+    member.sanity -= loss
+    member.sanity_lost += loss
+    long_term = bool(member.starting_sanity and member.sanity_lost * 5 >= member.starting_sanity)
+    if loss <= 0 or member.madness_long or (loss < 5 and not long_term):
+        return loss
+    if not member.madness:
+        member.madness = random.choice(list(MADNESS_LINES))
+        member.compulsive_weapon = None
+        if member.madness == "기절" and not member.unconscious:
+            member.unconscious = True
+            member.madness_knockout = True
+            member.cover_active = False
+    if long_term:
+        member.madness_long = True
+        member.madness_turns = 0
+    else:
+        member.madness_turns = max(member.madness_turns, random.randint(1, 10))
+        if session.participants[session.turn_index] is member:
+            member.madness_skip_end = session.turn_serial
+    append_combat_log(session, f"【{combat_madness_label(member)}】 {member.character_name}")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+    return loss
+
+
+def end_combat_madness_turn(session: CombatSession, member: CombatParticipant) -> None:
+    if not member.madness or member.madness_long or member.madness_last_end == session.turn_serial or member.madness_skip_end == session.turn_serial:
+        return
+    member.madness_last_end = session.turn_serial
+    member.madness_turns -= 1
+    if member.madness_turns > 0:
+        return
+    if member.madness_knockout:
+        member.unconscious = False
+        member.madness_knockout = False
+    member.madness = ""
+    member.compulsive_weapon = None
+    append_combat_log(session, f"【일시적 광기 종료】 {member.character_name}")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+
+
+def lock_compulsive_weapon(member: CombatParticipant, weapon: CombatWeapon) -> None:
+    if member.madness == "강박" and member.compulsive_weapon is None:
+        member.compulsive_weapon = (weapon.name, weapon.skill_reference)
+
+
+def compulsion_allows(member: CombatParticipant, weapon: CombatWeapon) -> bool:
+    return member.madness != "강박" or member.compulsive_weapon is None or member.compulsive_weapon == (weapon.name, weapon.skill_reference)
+
+
+def available_combat_weapon(session: CombatSession, index: int) -> bool:
+    member = session.participants[session.turn_index]
+    weapon = member.weapons[index]
+    if member.madness == "도주" or not compulsion_allows(member, weapon):
+        return False
+    if member.madness == "강박" and member.compulsive_weapon is not None:
+        return True
+    return bool(combat_targets(session, weapon))
+
+
+async def redirect_madness_attack(session: CombatSession, weapon: CombatWeapon, target: int) -> int:
+    current = session.participants[session.turn_index]
+    if current.madness == "폭력성":
+        chosen = random.choice(combat_targets(session, weapon))
+        append_combat_log(session, f"【폭력성】 대상: {session.participants[chosen].character_name}")
+        return chosen
+    if current.madness != "감각 왜곡":
+        return target
+    luck = await combat_skill_value(current, "행운")
+    if luck is None:
+        raise SheetError("감각 왜곡 판정에 필요한 행운 값을 읽지 못했어요.")
+    roll, rolls, modifier = roll_combat_d100(current, session=session)
+    succeeded = combat_success_rank(coc_combat_check_result(roll, luck)) > 0
+    chosen = target
+    if not succeeded:
+        friends = [index for index, member in enumerate(session.participants)
+                   if index != session.turn_index and not member.enemy_id and combat_is_active(member)
+                   and session.mode == "레이드" and (not is_melee_weapon(weapon)
+                       or combat_distance(session, session.turn_index, index) == "근거리")]
+        chosen = random.choice(friends) if friends else session.turn_index
+    append_combat_log(session, f"행운 {combat_roll_text(current, roll, rolls, modifier, session=session)} / {luck}\n"
+                      f"【감각 왜곡 {'성공' if succeeded else '실패'}】 대상: {session.participants[chosen].character_name}")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+    return chosen
+
+
 BLACK_FOG_VISIONS = (
     "동료들이 당신의 시신을 묻고 있습니다.",
     "입 안에서 낯선 손이 이빨을 벌립니다.",
@@ -1432,10 +1554,16 @@ def releasable_combat_statuses(session: CombatSession, member: CombatParticipant
             if effect.source_index == source_index and (effect.retrievable or "충격" in effect.spec.kinds)]
 
 
-def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: CombatSession | None = None) -> tuple[int, list[int], int]:
+def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: CombatSession | None = None, context: str = "", weapon: CombatWeapon | None = None) -> tuple[int, list[int], int]:
     modifier -= int(member.major_wound)
     modifier -= int(maintaining_combat_shock(session, member))
     modifier -= member.paralysis_stacks
+    if member.madness == "심신성 장애" and context in {"attack", "defense", "spell_attack"}:
+        modifier -= 1
+    if member.madness == "떨림" and context == "attack" and weapon is not None and is_projectile_weapon(weapon):
+        modifier -= 1
+    if member.madness == "집중 붕괴" and context in {"spirit", "spell_attack"}:
+        modifier -= 1
     rolls = [random.randint(1, 100) for _ in range(abs(modifier) + 1)]
     return (min(rolls) if modifier > 0 else max(rolls)), rolls, modifier
 
@@ -1547,7 +1675,7 @@ def render_combat_field(session: CombatSession) -> str:
 def combat_targets(session: CombatSession, weapon: CombatWeapon | None = None) -> list[int]:
     return [
         index for index, member in enumerate(session.participants)
-        if combat_opponents(session, session.turn_index, index) and combat_is_active(member)
+        if (combat_opponents(session, session.turn_index, index) or (session.participants[session.turn_index].madness == "폭력성" and index != session.turn_index)) and combat_is_active(member)
         and (weapon is None or not is_melee_weapon(weapon)
              or combat_distance(session, session.turn_index, index) == "근거리")
     ]
@@ -1576,6 +1704,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 독액에 발 묶임(이동 패널티 +1)' if member.snared else ''}"
             f"{' · 마비 ' + str(member.paralysis_stacks) + '중첩(패널티 +' + str(member.paralysis_stacks) + ')' if member.paralyzed else ''}"
             f"{' · 엄폐 중' if member.cover_active and combat_is_active(member) else ''}"
+            f"{' · 【' + combat_madness_label(member) + '】' if member.madness else ''}"
             f"{' · 중상' if member.major_wound else ' · 임시처치' if member.temporarily_treated else ''}"
             f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
@@ -1914,7 +2043,7 @@ async def process_combat_black_fog(session: CombatSession) -> bool:
         if member.fog_checked_round == session.round_number:
             continue
         member.fog_checked_round = session.round_number
-        roll, rolls, modifier = roll_combat_d100(member, -penalty, session=session)
+        roll, rolls, modifier = roll_combat_d100(member, -penalty, session=session, context="spirit")
         result = coc_combat_check_result(roll, member.spirit)
         success = result not in {"실패", "대실패"}
         vision = random.choice(BLACK_FOG_VISIONS)
@@ -2292,6 +2421,7 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
     succeeded = result not in {"실패", "대실패"}
     member.major_wound = True
     if not succeeded:
+        member.madness_knockout = False
         member.unconscious = True
         member.cover_active = False
         record_combat_elimination(session, member)
@@ -2406,7 +2536,7 @@ async def attempt_combat_status_escape(session: CombatSession, member: CombatPar
         session.briefing = f"{member.character_name}의 {skill} 값을 읽지 못했어요. 해제 판정을 다시 시도해 주세요."
         print(f"Combat status escape read failed ({type(exc).__name__}).")
         return None
-    roll, rolls, modifier = roll_combat_d100(member, session=session)
+    roll, rolls, modifier = roll_combat_d100(member, session=session, context="spirit" if skill == "정신" else "")
     result = coc_combat_check_result(roll, value)
     succeeded = combat_success_rank(result) >= effect.spec.escape_difficulty
     effect.escape_pending = False
@@ -2429,9 +2559,27 @@ async def resolve_automatic_combat_status_checks(session: CombatSession, member:
             await attempt_combat_status_escape(session, member, effect)
 
 
+async def start_combat_madness_turn(session: CombatSession, member: CombatParticipant) -> None:
+    if not member.madness or member.madness_last_start == session.turn_serial:
+        return
+    member.madness_last_start = session.turn_serial
+    append_combat_log(session, f"【{member.madness}】 {random.choice(MADNESS_LINES[member.madness])}")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+    if member.madness == "발작적 행동" and combat_is_active(member):
+        raw, detail = roll_damage_formula("1d3")
+        damage, health = apply_combat_damage(member, raw, member)
+        append_combat_log(session, f"{detail}\n【발작적 행동 · {damage} 자해】 {health}")
+        session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        session.last_attack = f"{member.character_name} · 발작적 행동"
+        session.last_attack_events = [f"{damage} 자해 · {health}"]
+        await session.message.edit(content=render_combat_session(session), view=None)
+        await check_combat_major_wound(session, member, damage)
+
+
 async def prepare_combat_status_turn(session: CombatSession) -> bool:
     for _ in range(len(session.participants)):
         member = session.participants[session.turn_index]
+        await start_combat_madness_turn(session, member)
         member.status_effects = active_combat_statuses(session, member)
         for effect in member.status_effects[:]:
             if "지속" not in effect.spec.kinds or effect.last_tick == session.turn_serial:
@@ -2458,6 +2606,7 @@ async def prepare_combat_status_turn(session: CombatSession) -> bool:
             if combat_is_shocked(session, member) and not pending_combat_status_check(session, member):
                 session.briefing = f"{with_particle(member.character_name, '는', '은')} 충격 상태예요. 탈출 판정만 가능하고, 성공·실패 모두 턴이 끝나요."
             return False
+        end_combat_madness_turn(session, member)
         if await finish_combat_if_decided(session):
             return True
         previous_round = session.round_number
@@ -2555,6 +2704,12 @@ class CombatLobbyView(discord.ui.View):
                     await interaction.followup.send("마력 충전 무기를 가진 캐릭터의 현재 마력을 읽지 못했어요. 시트의 마력 현재값을 확인한 뒤 다시 시작해 주세요.", ephemeral=True)
                     return
                 magic_by_member = {id(member): value for member, value in zip(magic_users, magic_values)}
+                sane_players = [member for member in session.participants if not member.enemy_id]
+                sanity_values = await asyncio.gather(*(registry.get_skill_value(member.character_value, "이성") for member in sane_players))
+                if any(value is None for value in sanity_values):
+                    await interaction.followup.send("광기 판정에 필요한 현재 이성 값을 읽지 못했어요. 시트를 확인하고 다시 시작해 주세요.", ephemeral=True)
+                    return
+                starting_sanities = {id(member): value for member, value in zip(sane_players, sanity_values)}
                 spirits = {}
                 if session.fog_start_round:
                     fog_players = [member for member in session.participants if not member.enemy_id]
@@ -2590,7 +2745,15 @@ class CombatLobbyView(discord.ui.View):
                     member.major_wound = False
                     member.temporarily_treated = False
                     member.spirit = spirits.get(id(member))
-                    member.sanity = None
+                    member.sanity = starting_sanities.get(id(member))
+                    member.starting_sanity = member.sanity
+                    member.sanity_lost = 0
+                    member.madness = ""
+                    member.madness_long = False
+                    member.madness_turns = 0
+                    member.madness_last_start = member.madness_last_end = member.madness_skip_end = -1
+                    member.madness_knockout = False
+                    member.compulsive_weapon = None
                     member.fog_checked_round = 0
                     member.unconscious = False
                     member.forfeited = False
@@ -2794,10 +2957,11 @@ async def forfeit_combat_member(session: CombatSession, index: int) -> None:
 
 def combat_first_aid_targets(session: CombatSession) -> list[int]:
     current = session.participants[session.turn_index]
-    if current.enemy_id:
+    if current.enemy_id or current.madness in {"폭력성", "도주"}:
         return []
     return [index for index, member in enumerate(session.participants)
             if not member.enemy_id and combat_is_present(member)
+            and (member is current or member.madness != "편집증")
             and (member.hp < member.max_hp or member.major_wound or member.paralyzed or member.unconscious
                  or any("지속" in effect.spec.kinds for effect in active_combat_statuses(session, member)))
             and (member is current or (session.mode == "레이드"
@@ -2831,7 +2995,7 @@ class CombatWeaponSelect(discord.ui.Select):
         current = session.participants[session.turn_index]
         available = [
             (index, weapon) for index, weapon in enumerate(current.weapons)
-            if combat_targets(session, weapon) and not maintaining_combat_shock(session, current)
+            if available_combat_weapon(session, index) and not maintaining_combat_shock(session, current)
         ]
         options = [
             discord.SelectOption(
@@ -2876,7 +3040,7 @@ class CombatView(CombatActionView):
             else:
                 self.add_item(CombatStatusEscapeSelect(session))
             return
-        available_weapons = [weapon for weapon in current.weapons if combat_targets(session, weapon)]
+        available_weapons = [weapon for index, weapon in enumerate(current.weapons) if available_combat_weapon(session, index)]
         if maintaining_combat_shock(session, current) and not combat_first_aid_targets(session):
             self.add_item(discord.ui.Button(label="충격 유지 중 · 다른 공격 불가", style=discord.ButtonStyle.secondary, disabled=True))
         elif available_weapons or combat_first_aid_targets(session):
@@ -2907,6 +3071,13 @@ class CombatView(CombatActionView):
         )
         cover_button.callback = self.take_cover
         self.add_item(cover_button)
+        if current.madness == "도주":
+            for item in list(self.children):
+                if isinstance(item, discord.ui.Select):
+                    self.remove_item(item)
+                elif getattr(item, "label", "") not in {"거리 넓히기", "기권", "레이드 종료", "훈련 종료"}:
+                    item.disabled = True
+            widen_button.disabled = False
 
     async def release_bindings(self, interaction: discord.Interaction) -> None:
         session = self.session
@@ -2920,6 +3091,9 @@ class CombatView(CombatActionView):
                 return
             if combat_is_shocked(session, current) or pending_combat_status_check(session, current) or session.pending_attack is not None:
                 await interaction.followup.send("자기 행동 차례에 상태 판정을 마친 뒤 회수해 주세요.", ephemeral=True)
+                return
+            if current.madness == "도주":
+                await interaction.followup.send("【도주】 거리를 넓혀야 해요.", ephemeral=True)
                 return
             bindings = releasable_combat_statuses(session, current)
             if not bindings:
@@ -2989,6 +3163,9 @@ class CombatView(CombatActionView):
             if not await self.allow_normal_action(interaction):
                 return
             current = session.participants[session.turn_index]
+            if current.madness == "도주":
+                await interaction.followup.send("【도주】 거리를 넓혀야 해요.", ephemeral=True)
+                return
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
@@ -3041,11 +3218,19 @@ class CombatView(CombatActionView):
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
-            if current.movement_choice == "cover":
+            if current.madness == "도주" and direction < 0:
+                await interaction.response.send_message("【도주】 거리를 넓혀야 해요.", ephemeral=True)
+                return
+            if current.movement_choice == "cover" and current.madness != "도주":
                 await interaction.response.send_message("엄폐를 시도한 턴에는 거리를 이동할 수 없어요.", ephemeral=True)
                 return
             targets = [i for i in combat_targets(session)
                        if combat_distance(session, session.turn_index, i) != ("근거리" if direction < 0 else "먼 거리")]
+            if current.madness == "도주":
+                opponents = [i for i, member in enumerate(session.participants)
+                             if combat_opponents(session, session.turn_index, i) and combat_is_active(member)]
+                targets = sorted(opponents, key=lambda i: abs(current.position - session.participants[i].position))[:1]
+                target_index = targets[0] if targets else None
             if not targets:
                 await interaction.response.send_message("더 이동할 수 있는 상대가 없어요.", ephemeral=True)
                 return
@@ -3077,6 +3262,9 @@ class CombatView(CombatActionView):
             await interaction.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
             movement = f"{target.character_name} 쪽으로 거리를 좁혔어요" if direction < 0 else f"{target.character_name}에게서 거리를 넓혔어요"
+            if current.madness == "도주":
+                await self.complete_attack_turn(f"【도주】 {current.character_name}의 턴 종료")
+                return
             if not succeeded:
                 await self.complete_attack_turn(f"{with_particle(current.character_name, '가', '이')} {movement}. 민첩 판정에 실패해 턴을 넘겨요.")
             else:
@@ -3141,6 +3329,7 @@ class CombatView(CombatActionView):
                     target.status_effects = remaining
                     treated.append("지속 해제")
                 if target.unconscious:
+                    target.madness_knockout = False
                     target.unconscious = False
                     treated.append("기절 회복")
                 log += f"\n회복 1d3 [{healing}]\n【{target.hp - previous} 회복】 HP {previous} → {target.hp}"
@@ -3172,6 +3361,15 @@ class CombatView(CombatActionView):
                 await interaction.response.send_message("무기 선택이 만료됐어요. 화면을 새로 확인해 주세요.", ephemeral=True)
                 return
             weapon = current.weapons[weapon_index]
+            if current.madness == "도주" or not compulsion_allows(current, weapon):
+                await interaction.response.send_message("【광기】 지금은 그 행동을 할 수 없어요.", ephemeral=True)
+                return
+            if current.madness == "강박" and current.compulsive_weapon is not None and (
+                    weapon.broken or not combat_targets(session, weapon)
+                    or (is_projectile_weapon(weapon) and not weapon.ammo)):
+                await interaction.response.defer()
+                await self.repeat_compulsive_action(weapon)
+                return
             if not combat_targets(session, weapon):
                 await interaction.response.send_message("근접전 무기는 근거리에서만 사용할 수 있어요.", ephemeral=True)
                 return
@@ -3216,6 +3414,12 @@ class CombatView(CombatActionView):
             await interaction.followup.send("충격을 유지하는 동안에는 다른 공격을 할 수 없어요.", ephemeral=True)
             return
         weapon = current.weapons[weapon_index]
+        if current.madness == "도주" or not compulsion_allows(current, weapon):
+            await interaction.followup.send("【광기】 지금은 그 행동을 할 수 없어요.", ephemeral=True)
+            return
+        if current.madness == "강박" and current.compulsive_weapon is not None and (weapon.broken or not combat_targets(session, weapon) or (is_projectile_weapon(weapon) and not weapon.ammo)):
+            await self.repeat_compulsive_action(weapon)
+            return
         if is_spell_weapon(weapon):
             await self.prepare_spell(interaction, weapon_index, target_index)
             return
@@ -3242,6 +3446,8 @@ class CombatView(CombatActionView):
             random_target = target_index == -1
             if random_target:
                 target_index = random.choice(targets)
+            if current.madness == "폭력성":
+                target_index = targets[0]
             if target_index is None and len(targets) > 1:
                 await session.message.edit(
                     content=render_combat_session(session, "공격 대상 선택"),
@@ -3254,6 +3460,7 @@ class CombatView(CombatActionView):
                 await interaction.followup.send("공격 대상이 전투에서 빠졌어요. 대상을 다시 선택해 주세요.", ephemeral=True)
                 return
 
+            target_index = await redirect_madness_attack(session, weapon, target_index)
             attack = PendingCombatAttack(session.turn_index, target_index, weapon_index, skill_value, shot_count)
             if weapon.malfunction is not None:
                 attack.luck_value = await registry.get_skill_value(current.character_value, "행운")
@@ -3266,6 +3473,7 @@ class CombatView(CombatActionView):
                     attack.fumble_weapon = next((item for item in weapons if "비무장" in item.name), None)
                 if attack.fumble_weapon is None:
                     raise SheetError("대실패 피해에 필요한 비무장 무기를 시트에서 찾지 못했어요.")
+            lock_compulsive_weapon(current, weapon)
             session.pending_attack = attack
             session.last_attack = f"{current.character_name} → {session.participants[target_index].character_name} · {weapon.name}"
             if random_target:
@@ -3284,6 +3492,11 @@ class CombatView(CombatActionView):
                 await session.message.edit(content=render_combat_session(session), view=CombatView(session))
             await interaction.followup.send("굴림을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
 
+    async def repeat_compulsive_action(self, weapon: CombatWeapon) -> None:
+        append_combat_log(self.session, f"【강박】 {weapon.name}을 반복했지만 효과가 없어요.")
+        self.session.recent_logs = self.session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        await self.complete_attack_turn("강박 행동으로 턴을 마쳤어요.")
+
     async def prepare_spell(self, interaction: discord.Interaction, weapon_index: int, target_index: int | None) -> None:
         session = self.session
         caster = session.participants[session.turn_index]
@@ -3292,6 +3505,8 @@ class CombatView(CombatActionView):
             targets = combat_targets(session, weapon)
             if not targets:
                 raise SheetError("주문을 사용할 상대가 없어요.")
+            if caster.madness == "폭력성":
+                target_index = targets[0]
             if target_index is None and len(targets) > 1:
                 await session.message.edit(content=render_combat_session(session, "주문 대상 선택"),
                                            view=CombatTargetView(session, weapon_index, 1, targets))
@@ -3301,6 +3516,7 @@ class CombatView(CombatActionView):
             target_index = targets[0] if target_index is None else target_index
             if target_index not in targets:
                 raise SheetError("주문 대상을 다시 선택해 주세요.")
+            target_index = await redirect_madness_attack(session, weapon, target_index)
             defender = session.participants[target_index]
             spirit = await combat_skill_value(caster, "정신")
             defense = await combat_skill_value(defender, "정신")
@@ -3332,6 +3548,9 @@ class CombatView(CombatActionView):
                 return
             await self.cast_spell()
         except SheetError as exc:
+            if caster.madness == "강박" and caster.compulsive_weapon is not None and (str(exc).startswith("주문 대가로") or str(exc).startswith("마력이 부족하고")):
+                await self.repeat_compulsive_action(weapon)
+                return
             await interaction.followup.send(str(exc), ephemeral=True)
         except Exception as exc:
             print(f"Combat spell preparation failed ({type(exc).__name__}).")
@@ -3371,17 +3590,18 @@ class CombatView(CombatActionView):
             record_combat_elimination(session, caster)
         if "이성" in costs:
             previous = caster.sanity
-            caster.sanity = max(0, caster.sanity - costs["이성"])
+            lose_combat_sanity(session, caster, costs["이성"])
             spent.append(f"이성 {previous} → {caster.sanity} (-{costs['이성']})")
         if "정신" in costs:
             previous = caster.spirit
             caster.spirit -= costs["정신"]
             spent.append(f"정신 {previous} → {caster.spirit}")
+        lock_compulsive_weapon(caster, weapon)
         attack.skill_value = caster.spirit
         # Self-targeting isn't offered, but keep stored defense consistent with resource changes.
         if target is caster:
             attack.spell_defense_value = caster.spirit
-        roll, rolls, modifier = roll_combat_d100(caster, session=session)
+        roll, rolls, modifier = roll_combat_d100(caster, session=session, context="spell_attack")
         result = coc_combat_check_result(roll, attack.skill_value)
         attack.spell_result = result
         if combat_success_rank(result):
@@ -3394,7 +3614,11 @@ class CombatView(CombatActionView):
         attack.stage = "defense"
         session.briefing = f"{target.character_name}의 정신 대항 차례예요!"
         await session.message.edit(content=render_combat_session(session), view=CombatSpellDefenseView(session))
-        if target.enemy_id:
+        if target is caster:
+            if attack.hits:
+                await self.apply_incoming_hits()
+            await self.complete_attack_turn("감각 왜곡으로 자신을 공격했어요.")
+        elif target.enemy_id:
             await CombatSpellDefenseView(session).resolve_spell()
 
     async def process_pending_attack(self, interaction: discord.Interaction | None = None) -> None:
@@ -3412,7 +3636,7 @@ class CombatView(CombatActionView):
             outnumbered_bonus = 1 if target.defended_round == session.round_number else 0
             cover_penalty = 1 if target.cover_active and is_firearm_weapon(weapon) and distance != "근거리" else 0
             net_modifier = attack.modifier + distance_modifier + outnumbered_bonus - burst_penalty - cover_penalty
-            roll, rolls, net_modifier = roll_combat_d100(current, net_modifier, session=session)
+            roll, rolls, net_modifier = roll_combat_d100(current, net_modifier, session=session, context="attack", weapon=weapon)
             result = coc_combat_check_result(roll, attack.skill_value)
             dice_text = combat_roll_text(current, roll, rolls, net_modifier, session=session)
             reasons = []
@@ -3485,7 +3709,7 @@ class CombatView(CombatActionView):
         if not attack.hits and (not is_melee_weapon(weapon) or combat_is_shocked(session, target)):
             await self.complete_attack_turn("공격이 빗나갔어요.")
             return
-        needs_response = target.enemy_id != "dummy" and not combat_is_shocked(session, target) and (is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp)
+        needs_response = target is not current and target.enemy_id != "dummy" and not combat_is_shocked(session, target) and (is_melee_weapon(weapon) or not is_firearm_weapon(weapon) or target.is_pulp)
         if needs_response:
             attack.stage = "defense"
             if target.enemy_id:
@@ -3584,6 +3808,7 @@ class CombatView(CombatActionView):
             current.paralysis_skip_end_serial = -1
             append_combat_log(session, f"【마비 해제】 {current.character_name}")
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        end_combat_madness_turn(session, current)
         advance_combat_turn(session)
         next_turn = session.participants[session.turn_index]
         session.briefing = f"{summary} 이제 {next_turn.character_name}의 턴이에요!"
@@ -3600,6 +3825,9 @@ class CombatView(CombatActionView):
             if not await self.allow_normal_action(interaction):
                 return
             current = session.participants[session.turn_index]
+            if current.madness == "도주":
+                await interaction.response.send_message("【도주】 거리 넓히기를 눌러 주세요.", ephemeral=True)
+                return
             if interaction.user.id != current.user_id:
                 await interaction.response.send_message(f"지금은 **{current.character_name}** 차례예요.", ephemeral=True)
                 return
@@ -3682,7 +3910,7 @@ class CombatShotCountView(CombatActionView):
             unavailable = (current.magic_points == 0 if weapon.magic_ammo else weapon.reload_count >= 3)
             reload_button = discord.ui.Button(
                 label=label, style=discord.ButtonStyle.primary,
-                disabled=weapon.broken or capacity <= 0 or (weapon.ammo or 0) >= capacity or unavailable,
+                disabled=weapon.broken or capacity <= 0 or (weapon.ammo or 0) >= capacity or unavailable or (current.madness == "강박" and current.compulsive_weapon is not None),
             )
             reload_button.callback = self.reload_weapon
             self.add_item(reload_button)
@@ -3694,6 +3922,9 @@ class CombatShotCountView(CombatActionView):
             if not await self.ensure_current(interaction):
                 return
             current = session.participants[session.turn_index]
+            if current.madness == "도주" or (current.madness == "강박" and current.compulsive_weapon is not None):
+                await interaction.followup.send("【광기】 재장전 대신 같은 행동을 반복해야 해요.", ephemeral=True)
+                return
             if session.pending_attack is not None or not combat_is_active(current):
                 await interaction.followup.send("자기 행동 차례에만 재장전할 수 있어요.", ephemeral=True)
                 return
@@ -3810,6 +4041,13 @@ class CombatSpellCostView(CombatActionView):
             if attack is None or attack.stage != "confirm" or interaction.user.id != self.session.participants[attack.attacker_index].user_id:
                 await interaction.response.send_message("시전자만 취소할 수 있어요.", ephemeral=True)
                 return
+            current = self.session.participants[self.session.turn_index]
+            if current.madness == "강박" and current.compulsive_weapon is not None:
+                weapon = current.weapons[attack.weapon_index]
+                self.session.pending_attack = None
+                await interaction.response.defer()
+                await CombatView(self.session).repeat_compulsive_action(weapon)
+                return
             self.session.pending_attack = None
             current = self.session.participants[self.session.turn_index]
             self.session.briefing = f"시전을 취소했어요. 아직 {current.character_name}의 턴이에요!"
@@ -3836,7 +4074,7 @@ class CombatSpellDefenseView(CombatActionView):
             return
         attack.stage = "resolving"
         defender = session.participants[attack.target_index]
-        roll, rolls, modifier = roll_combat_d100(defender, session=session)
+        roll, rolls, modifier = roll_combat_d100(defender, session=session, context="spirit")
         result = coc_combat_check_result(roll, attack.spell_defense_value)
         attack_rank = combat_success_rank(attack.spell_result)
         defense_rank = combat_success_rank(result)
@@ -3876,7 +4114,7 @@ class CombatDefenseView(CombatActionView):
         defender = session.participants[attack.target_index]
         if (is_melee_weapon(weapon) and combat_is_active(session.participants[attack.attacker_index])
                 and not maintaining_combat_shock(session, defender)):
-            indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken]
+            indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken and compulsion_allows(defender, item)]
             if len(indexes) > 1:
                 self.add_item(CombatCounterWeaponSelect(defender, indexes))
             elif indexes:
@@ -3894,7 +4132,7 @@ class CombatDefenseView(CombatActionView):
             await self.resolve(interaction, "반격")
             return
         defender = self.session.participants[attack.target_index]
-        indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken]
+        indexes = [i for i, item in enumerate(defender.weapons) if is_melee_weapon(item) and not item.broken and compulsion_allows(defender, item)]
         index = indexes[0] if len(indexes) == 1 and "비무장" not in defender.weapons[indexes[0]].name else None
         await self.resolve(interaction, "반격", index)
 
@@ -3989,10 +4227,16 @@ class CombatDefenseView(CombatActionView):
                 await interaction.followup.send("판정과 피해를 진행하지 않았어요. 시트 연결과 값을 확인한 뒤 다시 눌러 주세요.", ephemeral=True)
             return
 
+        if counter_weapon is not None and not compulsion_allows(defender, counter_weapon):
+            session.briefing = "【강박】 고정된 무기로만 반격할 수 있어요."
+            await session.message.edit(content=render_combat_session(session), view=CombatDefenseView(session))
+            return
+        if counter_weapon is not None:
+            lock_compulsive_weapon(defender, counter_weapon)
         attack.stage = "resolving"
         session.briefing = f"{defender.character_name}의 {action} 판정을 처리하고 있어요."
 
-        roll, rolls, modifier = roll_combat_d100(defender, session=session)
+        roll, rolls, modifier = roll_combat_d100(defender, session=session, context="attack" if action == "반격" else "defense", weapon=counter_weapon)
         defender.defended_round = session.round_number
         result = coc_combat_check_result(roll, defense_skill)
         ranks = {"대실패": 0, "실패": 0, "보통 성공": 1, "어려운 성공": 2, "극단적 성공": 3, "대성공": 4}

@@ -1590,7 +1590,7 @@ async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) ->
                 CombatWeapon("정글도", "근접전 | 격투", "1d8", damage_bonus="DB", impaling=True),
                 CombatWeapon("힘줄 베기", "근접전 | 격투", "1d4", damage_bonus="DB", effects=[CombatStatusSpec(("마비",), "건강")])]
     if member.enemy_id == "mage":
-        return [CombatWeapon("비무장", "근접전 | 격투", "1d3"), CombatWeapon("마력탄", "마법", "1d4")]
+        return [CombatWeapon("비무장", "근접전 | 격투", "1d3"), CombatWeapon("마력탄", "마법", "1d6")]
     if member.enemy_id == "dream":
         return [CombatWeapon("비무장 · 그림자", "근접전 | 격투", "1d4"),
                 CombatWeapon("접히는 실", "꿈의 침식", "1d4"),
@@ -1648,7 +1648,7 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
             source.damage_dealt += min(previous, shield_damage)
         if weapon is not None and is_melee_weapon(weapon):
             target.barrier_hits += 1
-            if target.barrier_hits >= 2:
+            if target.barrier_hits >= 3:
                 target.mana_barrier = 0
         if target.mana_barrier == 0:
             target.barrier_rebuild = True
@@ -5550,7 +5550,7 @@ def spawn_family_mage(session: CombatSession) -> None:
     mage.dexterity, mage.strength, mage.constitution, mage.size = spec["dex"], spec["str"], spec["con"], spec["size"]
     mage.spirit = 95
     mage.hp = mage.max_hp
-    mage.weapons = [CombatWeapon("비무장", "근접전 | 격투", "1d3"), CombatWeapon("마력탄", "마법", "1d4")]
+    mage.weapons = [CombatWeapon("비무장", "근접전 | 격투", "1d3"), CombatWeapon("마력탄", "마법", "1d6")]
     mage.position = max((p.position for p in session.participants if combat_is_present(p)), default=0) + 2
     mage.field_symbol = "◆"
     session.participants.append(mage)
@@ -5677,11 +5677,17 @@ async def take_family_turn(session: CombatSession) -> None:
             session.family_ops.append({"kind": "rebuild"})
         if (actor.magic_points or 0) < 2:
             session.family_ops.append({"kind": "recharge"})
-        else:
-            key, target = choose_family_spell(session, actor, targets)
-            session.family_ops.append({"kind": "cast", "spell": key, "target": target})
+        session.family_ops.append({"kind": "select_spell"})
     while session.family_ops:
         op = session.family_ops[0]
+        if op["kind"] == "select_spell":
+            targets = family_targets(session, actor)
+            if not targets:
+                session.family_ops.pop(0)
+                continue
+            key, target = choose_family_spell(session, actor, targets)
+            op = {"kind": "cast", "spell": key, "target": target}
+            session.family_ops[0] = op
         if op["kind"] == "cast" and op["spell"] in {"charm", "poison", "drain", "silence", "hold"}:
             targets = family_targets(session, actor) if op["spell"] == "poison" else [op["target"]]
             try:
@@ -5717,7 +5723,7 @@ async def take_family_turn(session: CombatSession) -> None:
             continue
         if op["kind"] == "recharge":
             actor.magic_points = min(19, (actor.magic_points or 0) + 5)
-            await show_raid_event(session, f"【마력 회복】 디안 · 마력 {actor.magic_points} · 공격 없음")
+            await show_raid_event(session, f"【마력 회복】 디안 · 마력 {actor.magic_points} · 주문을 이어갑니다.")
             continue
         key, target = op["spell"], op["target"]
         session.family_last_spell = key
@@ -5790,7 +5796,7 @@ async def resolve_family_spell(session: CombatSession) -> None:
     await show_raid_event(session, f"{target.character_name} · {'건강' if key == 'poison' else '정신'} {combat_roll_text(target, roll, rolls, modifier, session=session)} / {attack.spell_defense_value}\n【{result} · {'방어 성공' if blocked else FAMILY_SPELLS[key]}】")
     if not blocked:
         if key == "poison":
-            raw, detail = roll_damage_formula("1d3")
+            raw, detail = roll_damage_formula("1d6")
             damage, health = apply_combat_damage(target, raw, source)
             target.paralysis_stacks = min(2, target.paralysis_stacks + 1)
             target.paralysis_skip_end_serial = -1

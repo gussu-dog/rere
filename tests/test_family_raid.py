@@ -37,6 +37,8 @@ async def check():
     dmg, text = m.apply_combat_damage(b, 8, h, weapon=blade)
     assert dmg == 0 and b.hp == 8 and (b.mana_barrier == 24)
     m.apply_combat_damage(b, 1, s.participants[0], weapon=s.participants[0].weapons[0])
+    assert b.mana_barrier == 23 and b.hp == 8 and b.barrier_hits == 2
+    m.apply_combat_damage(b, 1, s.participants[0], weapon=s.participants[0].weapons[0])
     assert b.mana_barrier == 0 and b.hp == 8 and b.barrier_rebuild
     b.mana_barrier = 3
     b.barrier_hits = 0
@@ -68,7 +70,7 @@ async def check():
         s.family_events = [{'kind': 'pit'}]
         key, target = m.choose_family_spell(s, b, m.family_targets(s, b))
         assert key not in {'barrage', 'mark', 'pit'} and target != 4
-    print('PASS: delayed spawn preserves hunter state, HP8/barrier40, doubled machete damage, two melee hits, no overflow, status immunity, alliance reversal and two-boss victory, early hunter defeat, AI constraints')
+    print('PASS: delayed spawn preserves hunter state, HP8/barrier40, doubled machete damage, three melee hits, no overflow, status immunity, alliance reversal and two-boss victory, early hunter defeat, AI constraints')
 
 async def simulate():
     for seed in range(12):
@@ -206,6 +208,31 @@ class FamilyRaidTests(unittest.TestCase):
         session.family_events.clear()
         self.assertNotIn("※", m.render_combat_field(session))
         m.combat_sessions.clear()
+
+    def test_recharge_and_barrier_do_not_skip_attack(self):
+        async def check_recovery():
+            session = fixture()
+            m.spawn_family_mage(session)
+            session.turn_index = 4
+            session.turn_serial = 9
+            mage = session.participants[4]
+            mage.magic_points = 0
+            mage.mana_barrier = 0
+            mage.barrier_rebuild = True
+
+            def choose_after_recovery(current_session, actor, targets):
+                self.assertEqual(actor.magic_points, 5)
+                self.assertEqual(actor.mana_barrier, 40)
+                return "barrage", targets[0]
+
+            with patch.object(m, "choose_family_spell", side_effect=choose_after_recovery), patch.object(m, "begin_raid_attack", AsyncMock()) as attack, patch.object(m.CombatView, "complete_attack_turn", AsyncMock()) as complete:
+                await m.take_family_turn(session)
+                attack.assert_awaited_once()
+                complete.assert_not_awaited()
+                self.assertEqual(mage.magic_points, 3)
+                self.assertEqual(mage.weapons[1].damage, "1d6")
+
+        self.run_case(check_recovery)
 
     def test_complete_battles(self):
         self.run_case(simulate)

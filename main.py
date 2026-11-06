@@ -1328,6 +1328,7 @@ def lose_combat_sanity(session: CombatSession, member: CombatParticipant, amount
             member.unconscious = True
             member.madness_knockout = True
             member.cover_active = False
+            record_combat_elimination(session, member)
     if long_term:
         member.madness_long = True
         member.madness_turns = 0
@@ -1363,6 +1364,11 @@ def lock_compulsive_weapon(member: CombatParticipant, weapon: CombatWeapon) -> N
 
 def compulsion_allows(member: CombatParticipant, weapon: CombatWeapon) -> bool:
     return member.madness != "강박" or member.compulsive_weapon is None or member.compulsive_weapon == (weapon.name, weapon.skill_reference)
+
+
+def missing_compulsive_weapon(member: CombatParticipant) -> bool:
+    return (member.madness == "강박" and member.compulsive_weapon is not None
+            and not any((weapon.name, weapon.skill_reference) == member.compulsive_weapon for weapon in member.weapons))
 
 
 def available_combat_weapon(session: CombatSession, index: int) -> bool:
@@ -1559,7 +1565,7 @@ def maintaining_combat_shock(session: CombatSession | None, member: CombatPartic
     if session is None or not combat_is_active(member):
         return False
     return any(
-        combat_is_active(target) and any(
+        combat_is_present(target) and any(
             "충격" in effect.spec.kinds and session.participants[effect.source_index] is member
             for effect in active_combat_statuses(session, target)
         ) for target in session.participants
@@ -1568,7 +1574,7 @@ def maintaining_combat_shock(session: CombatSession | None, member: CombatPartic
 
 def releasable_combat_statuses(session: CombatSession, member: CombatParticipant) -> list[tuple[CombatParticipant, CombatStatusEffect]]:
     source_index = next(i for i, participant in enumerate(session.participants) if participant is member)
-    return [(target, effect) for target in session.participants if combat_is_active(target)
+    return [(target, effect) for target in session.participants if combat_is_present(target)
             for effect in active_combat_statuses(session, target)
             if effect.source_index == source_index and (effect.retrievable or "충격" in effect.spec.kinds)]
 
@@ -1835,6 +1841,17 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
 
 
 def record_combat_elimination(session: CombatSession, member: CombatParticipant) -> None:
+    if not combat_is_active(member):
+        source = next(index for index, item in enumerate(session.participants) if item is member)
+        released = False
+        for target in session.participants:
+            remaining = [effect for effect in target.status_effects
+                         if not (effect.source_index == source and "충격" in effect.spec.kinds)]
+            released = released or len(remaining) != len(target.status_effects)
+            target.status_effects = remaining
+        if released:
+            append_combat_log(session, f"【충격 해제】 {member.character_name}의 구속이 풀렸어요.")
+            session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
     if combat_is_present(member):
         return
     index = next(index for index, item in enumerate(session.participants) if item is member)
@@ -2226,8 +2243,6 @@ async def repost_combat_turn(session: CombatSession) -> None:
     # damage and escape checks before moving on, using the same round clock.
     while True:
         if await process_combat_black_fog(session):
-            return
-        if await trigger_round_raid_attack(session):
             return
         previous_round = session.round_number
         if await prepare_combat_status_turn(session):
@@ -3180,6 +3195,8 @@ class CombatWeaponSelect(discord.ui.Select):
             )
             for index, weapon in available[:24 if combat_first_aid_targets(session) else 25]
         ]
+        if missing_compulsive_weapon(current):
+            options.append(discord.SelectOption(label=trim_choice_name(f"강박:{current.compulsive_weapon[0]}"), value="compulsion_empty", description="사라진 무기로 같은 행동 반복 · 효과 없이 턴 종료"))
         if combat_first_aid_targets(session):
             options.append(discord.SelectOption(label="응급처치", value="first_aid", description="성공 시 1d3 회복 · 중상·마비·지속·기절 치료 · 턴 종료"))
         super().__init__(placeholder="사용할 무기를 선택해 주세요", min_values=1, max_values=1, options=options)
@@ -3188,7 +3205,9 @@ class CombatWeaponSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
         if isinstance(view, CombatView):
-            if self.values[0] == "first_aid":
+            if self.values[0] == "compulsion_empty":
+                await view.repeat_missing_compulsion(interaction)
+            elif self.values[0] == "first_aid":
                 await view.first_aid(interaction)
             else:
                 await view.select_weapon(interaction, int(self.values[0]))
@@ -3212,7 +3231,7 @@ class CombatView(CombatActionView):
         available_weapons = [weapon for index, weapon in enumerate(current.weapons) if available_combat_weapon(session, index)]
         if maintaining_combat_shock(session, current) and not combat_first_aid_targets(session):
             self.add_item(discord.ui.Button(label="충격 유지 중 · 다른 공격 불가", style=discord.ButtonStyle.secondary, disabled=True))
-        elif available_weapons or combat_first_aid_targets(session):
+        elif available_weapons or combat_first_aid_targets(session) or missing_compulsive_weapon(current):
             self.add_item(CombatWeaponSelect(session))
         elif any(is_melee_weapon(weapon) for weapon in current.weapons):
             self.add_item(discord.ui.Button(label="근접전은 근거리에서 가능해요", style=discord.ButtonStyle.secondary, disabled=True))
@@ -3660,6 +3679,17 @@ class CombatView(CombatActionView):
                 session.briefing = "시트 연결을 확인한 뒤 무기를 다시 선택해 주세요."
                 await session.message.edit(content=render_combat_session(session), view=CombatView(session))
             await interaction.followup.send("굴림을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.", ephemeral=True)
+
+    async def repeat_missing_compulsion(self, interaction: discord.Interaction) -> None:
+        async with self.session.lock:
+            if not await self.ensure_current(interaction) or not await self.allow_normal_action(interaction):
+                return
+            member = self.session.participants[self.session.turn_index]
+            if interaction.user.id != member.user_id or not missing_compulsive_weapon(member):
+                await interaction.response.send_message("현재 차례와 강박 행동을 다시 확인해 주세요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            await self.repeat_compulsive_action(CombatWeapon(*member.compulsive_weapon, "0"))
 
     async def repeat_compulsive_action(self, weapon: CombatWeapon) -> None:
         append_combat_log(self.session, f"【강박】 {weapon.name}을 반복했지만 효과가 없어요.")
@@ -4279,6 +4309,9 @@ class CombatManaSourceView(CombatActionView):
                 attack = session.pending_attack
                 if attack is None or attack.stage != "confirm" or interaction.user.id != session.participants[attack.attacker_index].user_id:
                     await interaction.response.send_message("시전자만 돌아갈 수 있어요.", ephemeral=True)
+                    return
+                if attack.spell_requested_donor is not None:
+                    await interaction.response.send_message("마력 요청이 진행 중이에요. 현재 화면의 요청 취소를 눌러 주세요.", ephemeral=True)
                     return
                 session.briefing = spell_funding_prompt(session)
                 await interaction.response.edit_message(content=render_combat_session(session), view=CombatSpellCostView(session))

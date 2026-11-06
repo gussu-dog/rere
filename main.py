@@ -237,7 +237,7 @@ class CombatWeapon:
     reload_count: int = 0
     spell_cost_text: str = ""
     area: bool = False
-    physical_spell: bool = False
+    health_resisted_spell: bool = False
 
     def __post_init__(self) -> None:
         if self.ammo_capacity is None and self.ammo is not None:
@@ -712,10 +712,10 @@ class SheetRegistry:
                 continue
             impaling = re.search(r"\(\s*치\s*\)", damage, re.IGNORECASE) is not None
             normalized_damage = damage.replace("（", "(").replace("）", ")")
-            physical_spell = skill_reference.strip() == "주문" and bool(re.search(r"\(\s*전체\s*[:：]\s*물리\s*\)", normalized_damage))
-            area = skill_reference.strip() == "주문" and bool(re.search(r"\(\s*전체(?:\s*[:：]\s*물리)?\s*\)", normalized_damage))
+            health_resisted_spell = skill_reference.strip() == "주문" and bool(re.search(r"\(\s*전체\s*[:：]\s*건강\s*\)", normalized_damage))
+            area = skill_reference.strip() == "주문" and bool(re.search(r"\(\s*전체(?:\s*[:：]\s*건강)?\s*\)", normalized_damage))
             if area:
-                damage = re.sub(r"\(\s*전체(?:\s*[:：]\s*물리)?\s*\)", "", normalized_damage).strip()
+                damage = re.sub(r"\(\s*전체(?:\s*[:：]\s*건강)?\s*\)", "", normalized_damage).strip()
             damage, effects = parse_combat_statuses(damage)
             ammo_text = cell(row, ammo_index)
             ammo = first_number(ammo_text)
@@ -733,7 +733,7 @@ class SheetRegistry:
                 malfunction=malfunction,
                 effects=effects,
                 area=area,
-                physical_spell=physical_spell,
+                health_resisted_spell=health_resisted_spell,
                 spell_cost_text=ammo_text if skill_reference.strip() == "주문" else "",
                 magic_ammo=bool(re.search(r"[（(]\s*마력\s*[）)]", ammo_text)),
             ))
@@ -1698,7 +1698,7 @@ def combat_spell_summary(weapon: CombatWeapon) -> str:
         return prefix + " · 지배 1턴 · 근거리"
     if weapon.damage.strip() == "멸망":
         return prefix + " · 멸망"
-    return prefix + (" · 물리 · 정신대항 없음" if weapon.physical_spell else "") + f" · 피해 {weapon.damage}" + (f" + 지속 피해 {weapon.damage}" if any("지속" in effect.kinds for effect in weapon.effects) else "")
+    return prefix + (" · 건강 판정으로 저항" if weapon.health_resisted_spell else "") + f" · 피해 {weapon.damage}" + (f" + 지속 피해 {weapon.damage}" if any("지속" in effect.kinds for effect in weapon.effects) else "")
 
 
 def is_spell_weapon(weapon: CombatWeapon) -> bool:
@@ -3671,7 +3671,7 @@ class CombatWeaponSelect(discord.ui.Select):
         ]
         options = [
             discord.SelectOption(
-                label=trim_choice_name(f"주문:{weapon.name}{' (전체:물리)' if weapon.physical_spell else ' (전체)' if weapon.area else ''}" if is_spell_weapon(weapon) else f"{weapon.name} — {weapon.skill_reference}"),
+                label=trim_choice_name(f"주문:{weapon.name}{' (전체:건강)' if weapon.health_resisted_spell else ' (전체)' if weapon.area else ''}" if is_spell_weapon(weapon) else f"{weapon.name} — {weapon.skill_reference}"),
                 value=str(index),
                 description=trim_choice_name(
                     (combat_spell_summary(weapon) if is_spell_weapon(weapon) else f"피해 {weapon.damage} · DB {weapon.damage_bonus or '없음'}")
@@ -4341,17 +4341,17 @@ class CombatView(CombatActionView):
             if not doom and not weapon.area:
                 target_index = await redirect_madness_attack(session, weapon, target_index)
             defender = session.participants[target_index]
-            spirit = (caster.spirit or 0) if doom or weapon.physical_spell else await combat_skill_value(caster, "정신")
+            spirit = (caster.spirit or 0) if doom or weapon.health_resisted_spell else await combat_skill_value(caster, "정신")
             defenses = {}
-            if not doom and not weapon.physical_spell:
+            if not doom:
                 for index in (targets if weapon.area else [target_index]):
-                    value = await combat_skill_value(session.participants[index], "정신")
+                    value = await combat_skill_value(session.participants[index], "건강" if weapon.health_resisted_spell else "정신")
                     if value is None:
-                        raise SheetError("정신 대항에 필요한 정신 값을 읽지 못했어요.")
+                        raise SheetError("주문 방어에 필요한 특성치를 읽지 못했어요.")
                     defenses[index] = value
             defense = defenses.get(target_index, 0)
             if spirit is None or defense is None:
-                raise SheetError("정신 대항에 필요한 정신 값을 읽지 못했어요.")
+                raise SheetError("주문 방어에 필요한 특성치를 읽지 못했어요.")
             if (not re.fullmatch(r"\d*[dD]\d+(?:[+-]\d+)?|\d+", weapon.damage.replace(" ", ""))
                     and not (weapon.damage == "0" and weapon.effects) and weapon.damage.strip() != "지배" and not doom):
                 raise SheetError("주문의 피해식이나 효과를 먼저 적어 주세요.")
@@ -4365,7 +4365,7 @@ class CombatView(CombatActionView):
                 caster.sanity = await combat_skill_value(caster, "이성")
                 if caster.sanity is None:
                     raise SheetError("현재 이성 값을 읽지 못했어요.")
-            if (doom or weapon.physical_spell) and "정신" in costs and caster.spirit is None:
+            if (doom or weapon.health_resisted_spell) and "정신" in costs and caster.spirit is None:
                 spirit = await combat_skill_value(caster, "정신")
                 if spirit is None:
                     raise SheetError("주문 대가에 필요한 정신 값을 읽지 못했어요.")
@@ -4470,13 +4470,13 @@ class CombatView(CombatActionView):
             append_combat_log(session, session.last_attack + "\n" + session.last_attack_events[0])
             await resolve_combat_annihilation(session, caster)
             return
-        if weapon.physical_spell:
+        if weapon.health_resisted_spell:
             attack.spell_result = "보통 성공"
             attack.hits = [(0, "보통 성공", 1)]
-            session.last_attack = f"{caster.character_name} · {weapon.name} (전체:물리)"
+            session.last_attack = f"{caster.character_name} · {weapon.name} (전체:건강)"
             session.last_attack_events = ["대가: " + (" · ".join(spent) or "없음")]
             append_combat_log(session, session.last_attack + "\n" + session.last_attack_events[0])
-            await resolve_physical_spell_target(session)
+            await begin_health_spell_target(session)
             return
         attack.skill_value = caster.spirit
         # Self-targeting isn't offered, but keep stored defense consistent with resource changes.
@@ -5110,16 +5110,16 @@ class CombatSpellCostView(CombatActionView):
             await interaction.response.edit_message(content=render_combat_session(self.session), view=CombatView(self.session))
 
 
-async def resolve_physical_spell_target(session: CombatSession) -> None:
+async def begin_health_spell_target(session: CombatSession) -> None:
     attack = session.pending_attack
     if attack is None:
         return
     target = session.participants[attack.target_index]
-    attack.stage = "resolving"
-    append_combat_log(session, f"【물리 주문 명중】 {target.character_name} · 정신대항 없음")
-    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
-    await CombatView(session).apply_incoming_hits()
-    await CombatView(session).complete_attack_turn("물리 주문의 피해가 적용됐어요.")
+    attack.stage = "defense"
+    session.briefing = f"{target.character_name}의 건강 판정 차례예요!"
+    await session.message.edit(content=render_combat_session(session), view=CombatSpellDefenseView(session))
+    if target.enemy_id:
+        await CombatSpellDefenseView(session).resolve_spell()
 
 
 async def continue_combat_area_spell(session: CombatSession, previous: PendingCombatAttack) -> bool:
@@ -5132,8 +5132,8 @@ async def continue_combat_area_spell(session: CombatSession, previous: PendingCo
     session.pending_attack = attack
     defender = session.participants[target_index]
     weapon = session.participants[attack.attacker_index].weapons[attack.weapon_index]
-    if weapon.physical_spell:
-        await resolve_physical_spell_target(session)
+    if weapon.health_resisted_spell:
+        await begin_health_spell_target(session)
         return True
     session.briefing = f"전체 주문 · {defender.character_name}의 정신 대항 차례예요!"
     await session.message.edit(content=render_combat_session(session), view=CombatSpellDefenseView(session))
@@ -5143,6 +5143,12 @@ async def continue_combat_area_spell(session: CombatSession, previous: PendingCo
 
 
 class CombatSpellDefenseView(CombatActionView):
+    def __init__(self, session: CombatSession) -> None:
+        super().__init__(session)
+        attack = session.pending_attack
+        if attack is not None and session.participants[attack.attacker_index].weapons[attack.weapon_index].health_resisted_spell:
+            self.resist.label = "건강 판정"
+
     @discord.ui.button(label="정신 대항", style=discord.ButtonStyle.primary)
     async def resist(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         async with self.session.lock:
@@ -5150,7 +5156,7 @@ class CombatSpellDefenseView(CombatActionView):
                 return
             attack = self.session.pending_attack
             if attack is None or interaction.user.id != self.session.participants[attack.target_index].user_id:
-                await interaction.response.send_message("주문 대상만 정신 대항을 할 수 있어요.", ephemeral=True)
+                await interaction.response.send_message("주문 대상만 방어 판정을 할 수 있어요.", ephemeral=True)
                 return
             await interaction.response.defer()
             await self.resolve_spell()
@@ -5162,12 +5168,15 @@ class CombatSpellDefenseView(CombatActionView):
             return
         attack.stage = "resolving"
         defender = session.participants[attack.target_index]
-        roll, rolls, modifier = roll_combat_d100(defender, session=session, context="spirit")
+        weapon = session.participants[attack.attacker_index].weapons[attack.weapon_index]
+        health_check = weapon.health_resisted_spell
+        roll, rolls, modifier = roll_combat_d100(defender, session=session, context="" if health_check else "spirit")
         result = coc_combat_check_result(roll, attack.spell_defense_value)
         attack_rank = combat_success_rank(attack.spell_result)
         defense_rank = combat_success_rank(result)
-        blocked = attack_rank == 0 or defense_rank >= attack_rank
-        append_combat_log(session, f"{defender.character_name} · 정신 대항\n"
+        blocked = defense_rank > 0 if health_check else attack_rank == 0 or defense_rank >= attack_rank
+        label = "건강 판정" if health_check else "정신 대항"
+        append_combat_log(session, f"{defender.character_name} · {label}\n"
                           f"{combat_roll_text(defender, roll, rolls, modifier, session=session)} / {attack.spell_defense_value} 【{result}】\n"
                           + ("【주문 불발】 시전 판정 실패" if attack_rank == 0 else "【주문 방어 성공】" if blocked else "【주문 명중】"))
         session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -5181,7 +5190,7 @@ class CombatSpellDefenseView(CombatActionView):
                 await CombatView(session).apply_incoming_hits()
         else:
             session.last_attack_events.append("주문 효과 없음 · 대가는 소모")
-        await CombatView(session).complete_attack_turn("정신 대항 판정이 끝났어요.")
+        await CombatView(session).complete_attack_turn("건강 판정이 끝났어요." if health_check else "정신 대항 판정이 끝났어요.")
 
 
 class CombatCounterWeaponSelect(discord.ui.Select):

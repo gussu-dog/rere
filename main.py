@@ -1974,7 +1974,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         roster_members += [member for i, member in enumerate(session.participants) if i not in order]
         roster = "\n".join(
             (f"{member.field_symbol} {member.character_name}(누적 피해 {member.damage_received} · HP 없음)" if member.enemy_id == "dummy" else
-            f"{member.field_symbol} {member.character_name} · 공격 대신 불 조절" if kitchen.enemy_kind(member) == "pot" else
+            f"{member.field_symbol} {member.character_name} · {'불 줄이기 필요' if session.kitchen_state.pot_warning else '약불로 조리 중'}" if kitchen.enemy_kind(member) == "pot" else
             f"{'▶ ' if member is session.participants[session.turn_index] else ''}{member.field_symbol} {member.character_name} · 민첩 {member.dexterity}\n"
             f"{combat_hp_bar(member)} HP {member.hp}/{member.max_hp}"
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
@@ -2003,7 +2003,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
             f"{' · 지속' if combat_is_active(member) and any('지속' in effect.spec.kinds for effect in active_combat_statuses(session, member)) else ''}"
-            f"{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 기절' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''}")
+            f"{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 기절' if member.unconscious else ' · 손질 완료' if kitchen.is_enemy(member) and member.hp <= 0 else ' · 전투불능' if member.hp <= 0 else ''}")
             for member in roster_members
         )
     else:

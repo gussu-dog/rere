@@ -9,7 +9,7 @@ import main as m
 import kitchen_raid as k
 
 
-def fixture():
+def fixture(staged=False):
     players = [m.CombatParticipant(i, str(i), str(i), f"PC{i}", dexterity=80-i, strength=60, constitution=70, size=60,
                                    hp=80, max_hp=80, sanity=70, starting_sanity=70, spirit=65, magic_points=15,
                                    weapons=[m.CombatWeapon("비무장", "근접전 | 격투", "1d3"), m.CombatWeapon("검", "근접전 | 도검", "1d6")]) for i in (1, 2)]
@@ -20,6 +20,11 @@ def fixture():
     s = m.CombatSession(1, 91, 1, players+[dough], message=NS(id=9, edit=AsyncMock()), phase="combat", mode="레이드", enemy_id="kitchen")
     m.initialize_combat_field(s)
     k.initialize(s, 2)
+    if not staged:
+        k.spawn(s, "onion")
+        k.spawn(s, "shrimp")
+        k.spawn(s, "pot", 3)
+        s.turn_order = sorted(range(len(s.participants)), key=lambda i: -s.participants[i].dexterity)
     s.turn_index = 0
     m.combat_sessions[91] = s
     return s
@@ -46,27 +51,61 @@ class KitchenRaidTests(unittest.TestCase):
 
     def test_progress_overkill_and_zero_quality_completion(self):
         async def check():
-            s = fixture()
+            s = fixture(staged=True)
             self.assertEqual((s.kitchen_state.progress, s.kitchen_state.quality), (0, 100))
-            self.assertNotIn(5, m.combat_targets(s))
+            self.assertEqual([k.enemy_kind(p) for p in s.participants if p.enemy_id], ["dough"])
             dough = s.participants[2]
             m.apply_combat_damage(dough, dough.hp+5, s.participants[0], weapon=s.participants[0].weapons[1])
             self.assertEqual(s.kitchen_state.quality, 95)
             self.assertFalse(await m.finish_combat_if_decided(s))
             self.assertEqual(s.kitchen_state.progress, 25)
-            self.assertEqual(k.enemy_kind(s.participants[-1]), "noodle")
+            self.assertEqual(s.kitchen_state.next_ingredient, "noodle")
             count = len(s.participants)
             await m.finish_combat_if_decided(s)
             self.assertEqual(len(s.participants), count)
+            self.assertFalse(any(k.enemy_kind(p) == "noodle" for p in s.participants))
+            k.advance_recipe(s)
+            self.assertEqual({k.enemy_kind(p) for p in s.participants if p.enemy_id and m.combat_is_present(p)}, {"noodle", "onion"})
             s.kitchen_state.quality = 0
             self.assertFalse(await m.finish_combat_if_decided(s))
             for p in s.participants:
-                if k.enemy_kind(p) in {"onion", "shrimp", "noodle"}:
+                if k.enemy_kind(p) == "noodle":
+                    p.hp = 0
+            self.assertFalse(await m.finish_combat_if_decided(s))
+            self.assertFalse(s.kitchen_state.pot_warning)
+            for p in s.participants:
+                if k.enemy_kind(p) == "onion":
+                    p.hp = 0
+            self.assertFalse(await m.finish_combat_if_decided(s))
+            self.assertEqual(s.kitchen_state.next_ingredient, "shrimp")
+            k.advance_recipe(s)
+            for p in s.participants:
+                if k.enemy_kind(p) == "shrimp":
                     p.hp = 0
             self.assertTrue(await m.finish_combat_if_decided(s))
             self.assertTrue(s.kitchen_state.success)
             self.assertEqual(s.kitchen_state.progress, 100)
             self.assertIn("먹을 수 있는지는 별개의 문제", k.ending(s))
+        self.run_case(check)
+
+    def test_intermission_gives_response_time_and_no_material_overlap(self):
+        async def check():
+            s = fixture(staged=True)
+            s.participants[2].hp = 0
+            await m.finish_combat_if_decided(s)
+            pot_index = next(i for i, p in enumerate(s.participants) if k.enemy_kind(p) == "pot")
+            s.turn_index = pot_index
+            with patch.object(m, "publish_combat_panel", AsyncMock()), patch.object(m.CombatView, "complete_attack_turn", AsyncMock()), patch.object(m, "roll_damage_formula", return_value=(2, "1d6 [2]")):
+                await k.take_turn(s)
+                self.assertTrue(s.kitchen_state.pot_warning)
+                self.assertEqual(s.kitchen_state.quality, 100)
+                self.assertFalse(any(k.enemy_kind(p) in {"noodle", "onion"} for p in s.participants))
+                s.round_number += 1
+                s.turn_serial += 1
+                await k.take_turn(s)
+                self.assertEqual(s.kitchen_state.quality, 90)
+                self.assertFalse(s.kitchen_state.pot_warning)
+                self.assertEqual({k.enemy_kind(p) for p in s.participants if p.enemy_id and m.combat_is_present(p)}, {"noodle", "onion"})
         self.run_case(check)
 
     def test_force_control_succeeds_or_fails_once(self):
@@ -214,12 +253,16 @@ class KitchenRaidTests(unittest.TestCase):
         async def check():
             for seed in range(12):
                 m.random.seed(seed)
-                s = fixture()
+                s = fixture(staged=True)
                 async def publish(session, view):
                     session.message.id += 1
                 with patch.object(m, "publish_combat_panel", publish), patch.object(m.registry, "resolve_character_reference", AsyncMock(return_value=None)), patch.object(m.registry, "get_skill_value", AsyncMock(return_value=65)), patch.object(m, "refresh_combat_turn_weapons", AsyncMock()):
                     steps = 0
                     while s.phase == "combat" and steps < 400:
+                        ingredients = [p for p in s.participants if k.enemy_kind(p) in {"dough", "noodle", "onion", "shrimp"} and m.combat_is_present(p)]
+                        self.assertLessEqual(len(ingredients), 2)
+                        if ingredients:
+                            self.assertFalse(s.kitchen_state.pot_warning)
                         steps += 1
                         if s.pending_attack:
                             await m.CombatDefenseView(s).resolve_roll("회피")
@@ -241,8 +284,12 @@ class KitchenRaidTests(unittest.TestCase):
                                 targets = m.combat_targets(s)
                                 if targets:
                                     m.move_combat_position(s, s.turn_index, targets[0], -1)
-                                await m.CombatView(s).complete_attack_turn("재료에게 접근")
-                    self.assertEqual(s.phase, "finished", (seed, s.round_number, steps))
+                                after_move = [o.value for o in k.action_options(s) if o.value.startswith("prep:")]
+                                if after_move:
+                                    await k.use_action(s, interaction(s, actor.user_id), after_move[0], s.turn_serial)
+                                else:
+                                    await m.CombatView(s).complete_attack_turn("재료에게 접근")
+                    self.assertEqual(s.phase, "finished", (seed, s.round_number, steps, s.turn_index, s.kitchen_state.completed, s.kitchen_state.next_ingredient, s.kitchen_state.pot_warning, [(p.character_name, p.hp, p.position) for p in s.participants]))
                     self.assertTrue(s.kitchen_state.finished)
                     self.assertTrue(s.kitchen_state.success or not any(not p.enemy_id and m.combat_is_active(p) for p in s.participants))
         self.run_case(check)
@@ -251,10 +298,8 @@ class KitchenRaidTests(unittest.TestCase):
         async def check():
             s = fixture()
             s.turn_index = 5
+            s.kitchen_state.pot_warning = True
             with patch.object(m, "publish_combat_panel", AsyncMock()), patch.object(m.CombatView, "complete_attack_turn", AsyncMock()), patch.object(m, "roll_damage_formula", return_value=(4, "1d6 [4]")):
-                await k.take_turn(s)
-                self.assertTrue(s.kitchen_state.pot_warning)
-                s.turn_serial += 1
                 await k.take_turn(s)
                 self.assertFalse(s.kitchen_state.pot_warning)
                 self.assertEqual(s.kitchen_state.quality, 90)

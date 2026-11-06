@@ -38,6 +38,8 @@ class KitchenState:
     quality: int = 100
     completed: set[str] = field(default_factory=set)
     pot_warning: bool = False
+    next_ingredient: str = ""
+    pot_warning_round: int = 0
     pot_turns: int = 0
     seasoning: bool = False
     dough_anger: int = 0
@@ -104,19 +106,49 @@ def initialize(session: Any, difficulty: int) -> None:
     dough = next(p for p in session.participants if p.enemy_id == "kitchen")
     dough.kitchen_owner = session.kitchen_state
     dough.field_symbol = "ⓐ"
-    spawn(session, "onion")
-    spawn(session, "shrimp")
-    spawn(session, "pot", 3)
     session.turn_order = sorted(range(len(session.participants)), key=lambda i: -session.participants[i].dexterity)
     session.turn_index = session.turn_order[0]
     m.append_combat_log(session, "완벽한 식사를 만들 거예요! …재료가 조금 활발하긴 하지만요!")
+
+
+def begin_intermission(session: Any) -> None:
+    state = session.kitchen_state
+    if state.next_ingredient or state.progress == 100:
+        return
+    if any(enemy_kind(p) in {"dough", "noodle", "onion", "shrimp"} and m.combat_is_present(p) for p in session.participants):
+        return
+    state.next_ingredient = next(kind for kind in ("dough", "noodle", "onion", "shrimp") if kind not in state.completed)
+    pot = next((p for p in session.participants if enemy_kind(p) == "pot"), None)
+    if pot is None:
+        pot = spawn(session, "pot", 3)
+    pot.hp = pot.max_hp
+    state.pot_warning = True
+    state.pot_warning_round = session.round_number
+    m.append_combat_log(session, "잠깐! 다음 재료 전에 불부터 줄여주세요! 다음 라운드 냄비 차례까지 민첩·요리로 시도해 주세요.")
+
+
+def advance_recipe(session: Any) -> None:
+    state = session.kitchen_state
+    if not state.next_ingredient:
+        return
+    kind = state.next_ingredient
+    state.next_ingredient = ""
+    state.pot_warning = False
+    for member in session.participants:
+        if enemy_kind(member) == "pot":
+            member.hp = 0
+    spawn(session, kind)
+    if kind == "noodle":
+        spawn(session, "onion")
+    state.seasoning = True
+    m.append_combat_log(session, f"다음은 {'탈주하는 면발과 눈물 많은 양파' if kind == 'noodle' else INGREDIENTS[kind][0]} 차례예요! 간 맞추기도 할 수 있어요.")
 
 
 def status(session: Any) -> str:
     state = session.kitchen_state
     text = f"조리 진행도 {state.progress}% · 재료 상태 {state.quality}점"
     if state.pot_warning:
-        text += "\n♨ 넘침 예고 · 다음 냄비 차례 전 민첩·요리로 불을 줄이세요!"
+        text += f"\n♨ 중간 조리 · {state.pot_warning_round + 1}라운드 냄비 차례까지 민첩·요리로 불을 줄이세요!"
     if state.seasoning:
         text += "\n간 맞추기 가능 · 지능 성공 시 재료 상태 회복"
     current = session.participants[session.turn_index]
@@ -173,9 +205,6 @@ async def finish_if_decided(session: Any) -> bool:
             continue
         state.completed.add(kind)
         m.append_combat_log(session, f"【손질 완료】 {member.character_name} · 조리 진행도 {state.progress}%")
-        if kind == "dough":
-            spawn(session, "noodle", member.position)
-            m.append_combat_log(session, "반죽에서 생면이 뽑혀 나옵니다. 면발이 달아나기 시작해요!")
         if kind == "onion":
             for player in session.participants:
                 if player.enemy_id or not m.combat_is_active(player):
@@ -184,6 +213,7 @@ async def finish_if_decided(session: Any) -> bool:
                 success = m.combat_success_rank(m.coc_combat_check_result(roll, player.constitution)) > 0
                 player.kitchen_tears = not success
                 m.append_combat_log(session, f"【양파의 최후】 {player.character_name} · 건강 {m.combat_roll_text(player, roll, rolls, modifier, session=session)} / {player.constitution} · " + ("눈물 참기 성공" if success else "눈물! 다음 판정 패널티 +1"))
+    begin_intermission(session)
     session.recent_logs = session.recent_logs[-m.COMBAT_RECENT_LOG_LIMIT:]
     players = [p for p in session.participants if not p.enemy_id and m.combat_is_active(p)]
     if players and state.progress < 100 and not session.annihilated:
@@ -226,6 +256,9 @@ async def take_turn(session: Any) -> None:
         return
     kind = enemy_kind(actor)
     if kind == "pot":
+        if state.pot_warning and session.round_number <= state.pot_warning_round:
+            await m.CombatView(session).complete_attack_turn("다음 라운드 냄비 차례까지 불을 줄일 수 있어요!")
+            return
         state.pot_turns += 1
         if state.pot_warning:
             state.quality = max(0, state.quality - 10)
@@ -237,20 +270,19 @@ async def take_turn(session: Any) -> None:
                 damage, health = m.apply_combat_damage(player, raw, actor)
                 await event(session, f"{detail}\n【국물 화상 · {damage} 피해】 {player.character_name} · {health}")
                 await m.check_combat_major_wound(session, player, damage)
-        else:
-            state.pot_warning = True
-            await event(session, "냄비가 들썩거려요! 누가 불 좀 줄여주세요!\n다음 냄비 차례까지 민첩·요리로 불 줄이기")
-        if state.pot_turns % 3 == 0 and not state.seasoning:
-            state.seasoning = True
-            await event(session, "【간이 안 맞아요!】 소금이었을까요, 설탕이었을까요?\n지능으로 간 맞추기 가능")
-        await m.CombatView(session).complete_attack_turn("냄비를 확인해 주세요!")
+        advance_recipe(session)
+        await m.CombatView(session).complete_attack_turn("냄비 처리가 끝났어요. 다음 재료를 손질해 주세요!")
         return
     target = random.choice(players)
     if kind == "shrimp":
+        actor.pattern_step += 1
         target = max(players, key=lambda i: abs(session.participants[i].position - actor.position))
-        actor.position += 1 if actor.position >= session.participants[target].position else -1
-        state.quality = max(0, state.quality - 2)
-        await event(session, "【새우 탈주】 새우가 펄쩍 뛰어 달아납니다! 재료 상태 -2")
+        if actor.pattern_step % 2:
+            actor.position += 1 if actor.position >= session.participants[target].position else -1
+            state.quality = max(0, state.quality - 2)
+            await event(session, "【새우 탈주】 새우가 펄쩍 뛰어 달아납니다! 재료 상태 -2")
+        else:
+            await event(session, "새우가 제자리에서 꼬리를 흔듭니다. 지금이 붙잡을 기회예요!")
     if kind == "noodle":
         target = min(players, key=lambda i: abs(session.participants[i].position - actor.position))
         if m.combat_distance(session, session.turn_index, target) == "근거리":
@@ -461,7 +493,8 @@ async def use_action(session: Any, interaction: discord.Interaction, value: str,
             await event(session, f"【간 맞추기】 재료 상태 {state.quality}점 · " + ("좋은 향이 나요!" if success else "…설탕이었나 봐요!"))
         elif value.startswith("cool:") and success:
             state.pot_warning = False
-            await event(session, "【불 줄이기 성공】 냄비가 얌전해졌어요!")
+            advance_recipe(session)
+            await event(session, "【불 줄이기 성공】 냄비가 얌전해졌어요! 다음 재료를 준비해 주세요.")
         elif value.startswith("prep:") and success:
             raw, detail = m.roll_damage_formula("1d6+2")
             damage, health = m.apply_combat_damage(target, min(raw, target.hp), actor)

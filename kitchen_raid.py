@@ -184,6 +184,31 @@ def dish_name(score: int) -> str:
     return "먹을 수 있는지는 별개의 문제인 무언가"
 
 
+TASTING_REACTIONS = {
+    80: {
+        True: ("눈을 반짝이며 다음 한 입을 뜹니다.", "접시를 깨끗이 비우고 엄지를 세웁니다.", "소스까지 남김없이 맛있게 먹습니다."),
+        False: ("너무 뜨거워 눈물이 핑 돕니다. 그래도 포크는 멈추지 않습니다.", "급하게 먹다 사레가 들렸습니다. 맛있다는 손짓부터 합니다.", "행복하게 한 입 더 먹다가 뜨거운 소스에 혀를 데었습니다."),
+    },
+    50: {
+        True: ("모양을 잠깐 살펴보다가 고개를 끄덕이며 먹습니다.", "의외로 괜찮다는 표정으로 한 입 더 먹습니다.", "조금 독특한 식감에도 제법 맛있게 먹습니다."),
+        False: ("조금 센 간에 물을 한 모금 마십니다.", "낯선 식감에 잠깐 멈췄다가 조심스럽게 씹습니다.", "고개를 갸웃거리며 소스와 물을 번갈아 마십니다."),
+    },
+    1: {
+        True: ("표정 하나 바꾸지 않고 삼킵니다. 대단한 정신력입니다.", "재료의 원래 모습을 상상하며 꿋꿋하게 씹습니다.", "레레와 눈을 마주치고 조용히 엄지를 세웁니다."),
+        False: ("한 입 먹자마자 포크를 내려놓고 물을 찾습니다.", "무언가 바삭하면 안 되는 것이 바삭했습니다.", "애써 웃으려 했지만 얼굴이 먼저 진실을 말합니다."),
+    },
+    0: {
+        True: ("정체불명의 한 입을 삼켰습니다. 주변에서 박수가 나옵니다.", "인간의 가능성을 증명했습니다. 두 번째 한 입은 정중히 사양합니다.", "끝까지 미소를 지켰습니다. 포크를 쥔 손만 떨립니다."),
+        False: ("입에 넣기도 전에 몸이 시식을 거부합니다.", "접시와 눈이 마주친 것 같아 조용히 뒤로 물러납니다.", "한 입의 기억을 잊으려 물잔을 꼭 붙잡습니다."),
+    },
+}
+
+
+def tasting_reaction(score: int, success: bool) -> str:
+    tier = 80 if score >= 80 else 50 if score >= 50 else 1 if score > 0 else 0
+    return random.choice(TASTING_REACTIONS[tier][success])
+
+
 def ending(session: Any) -> str:
     state = session.kitchen_state
     if state and state.success:
@@ -224,8 +249,10 @@ async def finish_if_decided(session: Any) -> bool:
     if state.success:
         for player in players:
             roll, rolls, modifier = m.roll_combat_d100(player, session=session)
-            success = m.combat_success_rank(m.coc_combat_check_result(roll, player.constitution)) > 0
-            state.tasting.append(f"{player.field_symbol} {player.character_name} · 시식 건강 [{roll}] / {player.constitution} · " + ("맛있게 먹었어요!" if success else "조용히 물을 찾습니다."))
+            result = m.coc_combat_check_result(roll, player.constitution)
+            success = m.combat_success_rank(result) > 0
+            reaction = tasting_reaction(state.quality, success)
+            state.tasting.append(f"{player.field_symbol} {player.character_name} · 시식 건강 [{roll}] / {player.constitution} 【{result}】 {reaction}")
     session.phase = "finished"
     session.pending_attack = None
     m.combat_sessions.pop(session.channel_id, None)
@@ -261,9 +288,9 @@ async def take_turn(session: Any) -> None:
             return
         state.pot_turns += 1
         if state.pot_warning:
-            state.quality = max(0, state.quality - 10)
+            state.quality = max(0, state.quality - 15)
             state.pot_warning = False
-            await event(session, "【냄비 대분출】 재료 상태 -10 · 뜨거운 크림소스가 넘칩니다!")
+            await event(session, "【냄비 대분출】 재료 상태 -15 · 뜨거운 크림소스가 넘칩니다!")
             for index in players:
                 player = session.participants[index]
                 raw, detail = m.roll_damage_formula("1d6")
@@ -422,9 +449,9 @@ def action_options(session: Any) -> list[discord.SelectOption]:
             options.append(discord.SelectOption(label=f"{target.field_symbol} {target.character_name} 손질 · {skill}"[:100], value=f"prep:{i}:{skill}", description="성공 시 초과 피해 없이 1d6+2 손질 · 턴 종료"))
     if state.pot_warning:
         for skill in ("민첩", "예술/공예 | 요리"):
-            options.append(discord.SelectOption(label=f"불 줄이기 · {skill}", value=f"cool:{skill}", description="실패하면 1d3 화상 · 다른 동료 재시도 가능"))
+            options.append(discord.SelectOption(label=f"불 줄이기 · {skill}", value=f"cool:{skill}", description="실패 1d3 화상·재료 상태 -3 · 다른 동료 재시도 가능"))
     if state.seasoning:
-        options.append(discord.SelectOption(label="간 맞추기 · 지능", value="season", description="성공 재료 상태 +8 · 실패 -6 · 턴 종료"))
+        options.append(discord.SelectOption(label="간 맞추기 · 지능", value="season", description="성공 재료 상태 +8 · 실패 -10 · 턴 종료"))
     return options
 
 
@@ -489,7 +516,7 @@ async def use_action(session: Any, interaction: discord.Interaction, value: str,
         await event(session, f"{actor.character_name} · {skill} {m.combat_roll_text(actor, roll, rolls, modifier, session=session)} / {score} 【{result}】")
         if value == "season":
             state.seasoning = False
-            state.quality = min(100, state.quality + 8) if success else max(0, state.quality - 6)
+            state.quality = min(100, state.quality + 8) if success else max(0, state.quality - 10)
             await event(session, f"【간 맞추기】 재료 상태 {state.quality}점 · " + ("좋은 향이 나요!" if success else "…설탕이었나 봐요!"))
         elif value.startswith("cool:") and success:
             state.pot_warning = False
@@ -500,11 +527,11 @@ async def use_action(session: Any, interaction: discord.Interaction, value: str,
             damage, health = m.apply_combat_damage(target, min(raw, target.hp), actor)
             await event(session, f"손질 {detail}\n【안전한 손질 · {damage}】 {target.character_name} · {health}")
         else:
-            if value.startswith("prep:"):
-                state.quality = max(0, state.quality - 3)
+            penalty = 6 if value.startswith("prep:") else 3
+            state.quality = max(0, state.quality - penalty)
             raw, detail = m.roll_damage_formula("1d3")
             damage, health = m.apply_combat_damage(actor, raw, target)
-            await event(session, f"{detail}\n【{'뜨거워요!' if value.startswith('cool:') else '재료의 반격!'} · {damage} 피해】 {actor.character_name} · {health}")
+            await event(session, f"{detail}\n【{'뜨거워요!' if value.startswith('cool:') else '재료의 반격!'} · {damage} 피해】 {actor.character_name} · {health} · 재료 상태 -{penalty} → {state.quality}점")
             await m.check_combat_major_wound(session, actor, damage)
         await m.CombatView(session).complete_attack_turn("주방 일을 마쳤어요.")
 

@@ -103,9 +103,47 @@ class KitchenRaidTests(unittest.TestCase):
                 s.round_number += 1
                 s.turn_serial += 1
                 await k.take_turn(s)
-                self.assertEqual(s.kitchen_state.quality, 90)
+                self.assertEqual(s.kitchen_state.quality, 85)
                 self.assertFalse(s.kitchen_state.pot_warning)
                 self.assertEqual({k.enemy_kind(p) for p in s.participants if p.enemy_id and m.combat_is_present(p)}, {"noodle", "onion"})
+        self.run_case(check)
+
+    def test_tasting_reactions_follow_quality_and_health_result(self):
+        for score, tier in [(100, 80), (80, 80), (79, 50), (50, 50), (49, 1), (1, 1), (0, 0)]:
+            for success in (True, False):
+                for _ in range(6):
+                    self.assertIn(k.tasting_reaction(score, success), k.TASTING_REACTIONS[tier][success])
+
+        async def check():
+            for score in (100, 60, 20, 0):
+                for roll, success in ((1, True), (99, False)):
+                    s = fixture(staged=True)
+                    s.kitchen_state.completed = {"dough", "noodle", "onion", "shrimp"}
+                    s.kitchen_state.quality = score
+                    hp = [p.hp for p in s.participants[:2]]
+                    with patch.object(m, "roll_combat_d100", return_value=(roll, [roll], 0)):
+                        self.assertTrue(await m.finish_combat_if_decided(s))
+                    self.assertTrue(s.kitchen_state.success)
+                    self.assertEqual(hp, [p.hp for p in s.participants[:2]])
+                    self.assertEqual(len(s.kitchen_state.tasting), 2)
+                    tier = 80 if score >= 80 else 50 if score >= 50 else 1 if score > 0 else 0
+                    for line in s.kitchen_state.tasting:
+                        self.assertTrue(any(reaction in line for reaction in k.TASTING_REACTIONS[tier][success]))
+                        self.assertIn(f"[{roll}]", line)
+        self.run_case(check)
+
+    def test_mistakes_reduce_condition_without_extra_hp_damage(self):
+        async def check():
+            for action, penalty, hp in [("prep:3:손놀림", 6, 77), ("cool:민첩", 3, 77), ("season", 10, 80)]:
+                s = fixture()
+                s.participants[0].position = 1
+                s.kitchen_state.pot_warning = True
+                s.kitchen_state.seasoning = True
+                with patch.object(m.registry, "get_skill_value", AsyncMock(return_value=65)), patch.object(m, "roll_combat_d100", return_value=(99, [99], 0)), patch.object(m, "roll_damage_formula", return_value=(3, "1d3 [3]")), patch.object(m, "repost_combat_turn", AsyncMock()), patch.object(m, "refresh_combat_turn_weapons", AsyncMock()):
+                    await k.use_action(s, interaction(s), action, s.turn_serial)
+                self.assertEqual(s.kitchen_state.quality, 100 - penalty)
+                self.assertEqual(s.participants[0].hp, hp)
+                self.assertEqual(s.phase, "combat")
         self.run_case(check)
 
     def test_force_control_succeeds_or_fails_once(self):
@@ -210,7 +248,7 @@ class KitchenRaidTests(unittest.TestCase):
                 self.assertEqual(s.turn_index, 1)
                 await k.use_action(s, interaction(s, 2), "cool:민첩", s.turn_serial)
                 self.assertFalse(s.kitchen_state.pot_warning)
-            self.assertEqual(s.kitchen_state.quality, 100)
+            self.assertEqual(s.kitchen_state.quality, 97)
         self.run_case(check)
 
     def test_safe_preparation_and_missing_skill_do_not_damage_quality(self):
@@ -302,7 +340,7 @@ class KitchenRaidTests(unittest.TestCase):
             with patch.object(m, "publish_combat_panel", AsyncMock()), patch.object(m.CombatView, "complete_attack_turn", AsyncMock()), patch.object(m, "roll_damage_formula", return_value=(4, "1d6 [4]")):
                 await k.take_turn(s)
                 self.assertFalse(s.kitchen_state.pot_warning)
-                self.assertEqual(s.kitchen_state.quality, 90)
+                self.assertEqual(s.kitchen_state.quality, 85)
                 self.assertEqual(s.participants[0].hp, 76)
                 self.assertEqual(s.participants[1].hp, 76)
             for p in s.participants[:2]:

@@ -1157,6 +1157,7 @@ class CombatParticipant:
     madness_knockout: bool = False
     compulsive_weapon: tuple[str, str] | None = None
     fog_checked_round: int = 0
+    encounter_sanity_checked: bool = False
     unconscious: bool = False
     forfeited: bool = False
     sacrificed: bool = False
@@ -1248,6 +1249,7 @@ class CombatSession:
     fog_start_round: int = 0
     fog_processed_round: int = 0
     annihilated: bool = False
+    encounter_sanity_done: bool = False
     annihilation_logs: list[str] = field(default_factory=list)
 
 
@@ -1282,10 +1284,10 @@ CHIMERA_SPECIALS = {
 }
 CHIMERA_SPECIAL_DETAILS = {
     "burst": "전원에게 각각 1d6 공격 · 회피 가능, 반격 불가 · 엄폐 시 공격 패널티 +1",
-    "swallow": "1d3 피해 + 충격 · 근접전(격투)으로 탈출 · 유지 중 키메라는 다른 공격 불가",
+    "swallow": "1d3+DB 피해 + 충격 · 근접전(격투)으로 탈출 · 유지 중 키메라는 다른 공격 불가",
     "poison": "1d3 피해 + 지속 · 매 턴 시작 1d3 피해 후 건강 판정으로 해제 · 회피 가능",
-    "tail": "1d4 피해 · 명중하면 대상을 반대 방향으로 한 칸 밀어냄",
-    "charge": "민첩 판정으로 근거리까지 돌진 · 성공하면 1d6 공격, 실패하면 이동 후 턴 종료",
+    "tail": "1d4+DB 피해 · 명중하면 대상을 반대 방향으로 한 칸 밀어냄",
+    "charge": "민첩 판정으로 근거리까지 돌진 · 성공하면 1d6+DB 공격, 실패하면 이동 후 턴 종료",
 }
 MADNESS_LINES = {
     "심신성 장애": ("팔다리가 남의 것처럼 움직입니다.", "몸 안에서 누군가 힘줄을 잡아당깁니다.", "움직일 때마다 뼈가 뒤틀리는 느낌이 듭니다."),
@@ -2180,6 +2182,45 @@ async def process_combat_black_fog(session: CombatSession) -> bool:
     return False
 
 
+async def process_chimera_encounter_sanity(session: CombatSession) -> bool:
+    if session.enemy_id != "chimera" or session.encounter_sanity_done:
+        return False
+    for member in session.participants:
+        if member.enemy_id or member.encounter_sanity_checked:
+            continue
+        if member.sanity is None:
+            member.sanity = await combat_skill_value(member, "이성")
+            if member.sanity is None:
+                raise SheetError("키메라 조우 판정에 필요한 이성 값을 읽지 못했어요.")
+        if member.starting_sanity is None:
+            member.starting_sanity = member.sanity
+        previous = member.sanity
+        roll, rolls, modifier = roll_combat_d100(member, session=session)
+        succeeded = combat_success_rank(coc_combat_check_result(roll, previous)) > 0
+        formula = "1d3" if succeeded else "1d8"
+        amount, detail = roll_damage_formula(formula)
+        loss = lose_combat_sanity(session, member, amount)
+        member.encounter_sanity_checked = True
+        # This check happens before the first full turn, so that turn counts.
+        member.madness_skip_end = -1
+        outcome = "성공" if succeeded else "실패"
+        text = (f"{member.character_name} · 키메라 조우 이성 판정\n"
+                f"{combat_roll_text(member, roll, rolls, modifier, session=session)} / {previous} 【{outcome}】\n"
+                f"이성 손실 {detail} · 이성 {previous} → {member.sanity}")
+        append_combat_log(session, text)
+        session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        session.last_attack = "실험키메라 조우 · 이성 판정"
+        session.last_attack_events.append(f"{member.character_name} · 이성 -{loss}" + (f" · {member.madness}" if member.madness else ""))
+        session.briefing = "실험키메라를 마주했어요… 전원의 이성 판정을 진행해요."
+        await session.message.edit(content=render_combat_session(session), view=None)
+        await asyncio.sleep(0.7)
+    session.encounter_sanity_done = True
+    if await finish_combat_if_decided(session):
+        return True
+    session.briefing = f"이성 판정이 끝났어요. {session.participants[session.turn_index].character_name}의 턴이에요!"
+    return False
+
+
 async def repost_combat_turn(session: CombatSession) -> None:
     # A stationary dummy has no player controls. Its turn still ticks ongoing
     # damage and escape checks before moving on, using the same round clock.
@@ -2877,6 +2918,7 @@ class CombatLobbyView(discord.ui.View):
                     member.madness_knockout = False
                     member.compulsive_weapon = None
                     member.fog_checked_round = 0
+                    member.encounter_sanity_checked = False
                     member.unconscious = False
                     member.forfeited = False
                     member.sacrificed = False
@@ -2903,6 +2945,8 @@ class CombatLobbyView(discord.ui.View):
                 session.turn_index = 0
                 session.turn_serial = 1
                 session.briefing = f"전투 시작! {session.participants[0].character_name}의 턴이에요!"
+                if await process_chimera_encounter_sanity(session):
+                    return
                 await repost_combat_turn(session)
                 session.initiative_logs.clear()
         except Exception as exc:

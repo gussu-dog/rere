@@ -1960,7 +1960,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
                 remaining = max(0, event.threshold - (dream_boss(session).damage_received - event.damage_start))
                 sections.append(f"【{title}】 다음 보스 차례 전 {remaining} 피해 더 주면 {'취소' if event.kind == 'pulse' else '약화'}")
     if current.dream_betrayal:
-        sections.append("【뒤바뀐 얼굴】 이번 차례의 단일 공격은 동료에게만 가능 · 차례 넘기기로 버틸 수 있어요.")
+        sections.append("【뒤바뀐 얼굴】 근거리의 가장 가까운 동료에게 자동 맨손 공격 · 동료가 없으면 해제")
     if session.initiative_logs:
         sections.append("선공 동률 판정\n" + "\n".join(plain_text(entry) for entry in session.initiative_logs[-2:]))
     sections.append("")
@@ -2589,7 +2589,7 @@ async def take_dream_turn(session: CombatSession) -> None:
         target.dream_betrayal = not succeeded
         physical_weapon = 3
         await dream_log(session, f"【뒤바뀐 얼굴】 {target.character_name} · 정신 {combat_roll_text(target, roll, rolls, modifier, session=session)} / {value} 【{'성공' if succeeded else '실패'}】\n"
-                        + ("동료의 얼굴이 제자리로 돌아옵니다." if succeeded else "다음 차례, 단일 공격은 동료에게만 가능 · 넘기기로 버틸 수 있어요.")
+                        + ("동료의 얼굴이 제자리로 돌아옵니다." if succeeded else "다음 차례, 가장 가까운 근거리 동료를 자동 맨손 공격 · 없으면 해제")
                         + "\n그림자 2d4 공격 · 회피 가능")
     elif pattern == "sleep":
         target = random.choice(players)
@@ -2639,6 +2639,52 @@ async def end_dream_player_turn(session: CombatSession, member: CombatParticipan
         session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
 
 
+async def resolve_dream_betrayal(session: CombatSession) -> bool:
+    member = session.participants[session.turn_index]
+    if not member.dream_betrayal or not combat_is_active(member):
+        return False
+    if combat_is_shocked(session, member) or pending_combat_status_check(session, member):
+        return False
+    targets = [i for i, other in enumerate(session.participants)
+               if i != session.turn_index and not other.enemy_id and combat_is_active(other)
+               and combat_distance(session, session.turn_index, i) == "근거리"]
+    if not targets:
+        member.dream_betrayal = False
+        append_combat_log(session, f"【뒤바뀐 얼굴 해제】 {member.character_name} · 근거리 동료 없음")
+        session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+        session.briefing = f"가까이에 동료가 없어 환영이 풀렸어요. {member.character_name}의 턴이에요!"
+        return False
+    if maintaining_combat_shock(session, member):
+        await CombatView(session).complete_attack_turn("구속 유지 중이라 맨손 공격을 하지 못했어요.")
+        return True
+    nearest = min(abs(session.participants[i].position - member.position) for i in targets)
+    target = random.choice([i for i in targets if abs(session.participants[i].position - member.position) == nearest])
+    try:
+        index = next((i for i, weapon in enumerate(member.weapons)
+                      if "비무장" in weapon.name and is_melee_weapon(weapon)), None)
+        if index is None:
+            raise SheetError("시트에서 비무장 무기를 찾지 못했어요.")
+        weapon = member.weapons[index]
+        skill = await combat_skill_value(member, normalize_weapon_skill_reference(weapon.skill_reference))
+        if skill is None:
+            raise SheetError("맨손 공격 기능치를 읽지 못했어요.")
+    except Exception as exc:
+        print(f"Dream forced unarmed attack read failed ({type(exc).__name__}).")
+        session.briefing = "맨손 공격 값을 읽지 못했어요. 자동 공격을 다시 시도해 주세요."
+        await publish_combat_panel(session, CombatView(session))
+        return True
+    member.dream_betrayal = False
+    session.pending_attack = PendingCombatAttack(session.turn_index, target, index, skill, 1, fumble_weapon=weapon)
+    lock_compulsive_weapon(member, weapon)
+    session.last_attack = f"{member.character_name} → {session.participants[target].character_name} · 뒤바뀐 얼굴 · 맨손 공격"
+    session.last_attack_events = []
+    append_combat_log(session, session.last_attack)
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+    await publish_combat_panel(session, None)
+    await CombatView(session).process_pending_attack()
+    return True
+
+
 async def repost_combat_turn(session: CombatSession) -> None:
     # A stationary dummy has no player controls. Its turn still ticks ongoing
     # damage and escape checks before moving on, using the same round clock.
@@ -2656,6 +2702,8 @@ async def repost_combat_turn(session: CombatSession) -> None:
         if await trigger_round_raid_attack(session):
             return
         current = session.participants[session.turn_index]
+        if await resolve_dream_betrayal(session):
+            return
         if not current.enemy_id or combat_is_controlled(session, session.turn_index):
             if current.enemy_id:
                 current.actions_left = 1
@@ -3730,6 +3778,14 @@ class CombatView(CombatActionView):
             else:
                 self.add_item(CombatStatusEscapeSelect(session))
             return
+        if current.dream_betrayal:
+            for item in self.children:
+                if getattr(item, "label", "") == "차례 넘기기":
+                    item.disabled = True
+            retry = discord.ui.Button(label="맨손 자동 공격 재시도", style=discord.ButtonStyle.primary)
+            retry.callback = self.retry_dream_betrayal
+            self.add_item(retry)
+            return
         available_weapons = [weapon for index, weapon in enumerate(current.weapons) if available_combat_weapon(session, index)]
         if maintaining_combat_shock(session, current) and not combat_first_aid_targets(session):
             self.add_item(discord.ui.Button(label="충격 유지 중 · 다른 공격 불가", style=discord.ButtonStyle.secondary, disabled=True))
@@ -3770,6 +3826,18 @@ class CombatView(CombatActionView):
                 elif getattr(item, "label", "") not in {"거리 넓히기", "기권", "레이드 종료", "훈련 종료"}:
                     item.disabled = True
             widen_button.disabled = False
+
+    async def retry_dream_betrayal(self, interaction: discord.Interaction) -> None:
+        async with self.session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            member = self.session.participants[self.session.turn_index]
+            if interaction.user.id != combat_actor_user(self.session, member):
+                await interaction.response.send_message("현재 차례인 사람만 재시도할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            await refresh_combat_turn_weapons(self.session)
+            await repost_combat_turn(self.session)
 
     async def dream_utility(self, interaction: discord.Interaction, value: str) -> None:
         session = self.session
@@ -3849,6 +3917,9 @@ class CombatView(CombatActionView):
             await interaction.response.defer()
             await resolve_automatic_combat_status_checks(session, member)
             if not pending_combat_status_check(session, member):
+                if member.dream_betrayal:
+                    await repost_combat_turn(session)
+                    return
                 session.briefing = f"상태 해제 판정이 끝났어요. {member.character_name}의 턴이에요!"
             await session.message.edit(content=render_combat_session(session), view=CombatView(session))
 

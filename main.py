@@ -1681,7 +1681,7 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
         target.major_wound = True
         reopened = " · 【상처 재발 · 중상】"
     previous_hp = target.hp
-    kitchen_note = kitchen.damage_note(target, damage, weapon) if target.kitchen_owner is not None else ""
+    kitchen_note = kitchen.damage_note(target, damage, weapon, source) if target.kitchen_owner is not None else ""
     target.hp = max(1 if target.enemy_id == "dream" else 0, target.hp - damage)
     broken_armor = ""
     if target.armor_boosted and raw_damage >= 5 and not ignore_armor:
@@ -2379,6 +2379,8 @@ def advance_combat_turn(session: CombatSession) -> None:
                 session.dream_result = "success" if any(not p.enemy_id and combat_is_active(p) for p in session.participants) else "failure"
                 return
             session.round_number += 1
+            if session.enemy_id == "kitchen":
+                kitchen.process_round(session)
             if session.enemy_id == "hunter" and session.round_number >= 4 and not session.family_spawned:
                 spawn_family_mage(session)
             if session.fog_start_round and session.round_number in CHIMERA_ROUND_WARNINGS:

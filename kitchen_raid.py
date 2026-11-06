@@ -32,11 +32,23 @@ INGREDIENTS = {
 }
 
 
+INCIDENTS = {
+    "board": ("도마가 기울어요!", ("민첩",), 8),
+    "salt": ("누가 소금통을 열었어요!", ("손놀림",), 10),
+    "sauce": ("소스가 굳고 있어요!", ("예술/공예 | 요리", "근력"), 8),
+    "fall": ("재료가 바닥에 떨어지겠어요!", ("민첩", "손놀림"), 10),
+    "spice": ("레레가 수상한 조미료를 가져왔어요!", ("지능",), 6),
+}
+
+
 @dataclass
 class KitchenState:
     difficulty: int = 2
     quality: int = 100
     completed: set[str] = field(default_factory=set)
+    incident: str = ""
+    incident_due_round: int = 0
+    incident_last_round: int = 0
     pot_warning: bool = False
     next_ingredient: str = ""
     pot_warning_round: int = 0
@@ -109,6 +121,38 @@ def initialize(session: Any, difficulty: int) -> None:
     session.turn_order = sorted(range(len(session.participants)), key=lambda i: -session.participants[i].dexterity)
     session.turn_index = session.turn_order[0]
     m.append_combat_log(session, "완벽한 식사를 만들 거예요! …재료가 조금 활발하긴 하지만요!")
+    process_round(session)
+
+
+def clear_incident(state: KitchenState) -> None:
+    state.incident = ""
+    state.incident_due_round = 0
+
+
+def process_round(session: Any) -> None:
+    state = session.kitchen_state
+    if state is None or state.finished or state.incident_last_round == session.round_number:
+        return
+    state.incident_last_round = session.round_number
+    if state.incident:
+        if session.round_number > state.incident_due_round:
+            name, _, penalty = INCIDENTS[state.incident]
+            state.quality = max(0, state.quality - penalty)
+            clear_incident(state)
+            m.append_combat_log(session, f"【돌발 이벤트 방치】 {name} 재료 상태 -{penalty} → {state.quality}점")
+            session.recent_logs = session.recent_logs[-m.COMBAT_RECENT_LOG_LIMIT:]
+        return
+    if state.pot_warning or state.next_ingredient or state.progress == 100:
+        return
+    if not any(enemy_kind(p) in {"dough", "noodle", "onion", "shrimp"} and m.combat_is_present(p) for p in session.participants):
+        return
+    if random.random() >= 0.25:
+        return
+    state.incident = random.choice(tuple(INCIDENTS))
+    state.incident_due_round = session.round_number + 1
+    name, skills, penalty = INCIDENTS[state.incident]
+    m.append_combat_log(session, f"【돌발 이벤트】 {name}\n{state.incident_due_round}라운드 끝까지 {' / '.join(skills)}로 해결 · 실패 -2 · 방치 -{penalty}")
+    session.recent_logs = session.recent_logs[-m.COMBAT_RECENT_LOG_LIMIT:]
 
 
 def begin_intermission(session: Any) -> None:
@@ -117,6 +161,9 @@ def begin_intermission(session: Any) -> None:
         return
     if any(enemy_kind(p) in {"dough", "noodle", "onion", "shrimp"} and m.combat_is_present(p) for p in session.participants):
         return
+    if state.incident:
+        clear_incident(state)
+        m.append_combat_log(session, "재료 손질을 마치면서 주방의 소동도 정리됐어요.")
     state.next_ingredient = next(kind for kind in ("dough", "noodle", "onion", "shrimp") if kind not in state.completed)
     pot = next((p for p in session.participants if enemy_kind(p) == "pot"), None)
     if pot is None:
@@ -147,6 +194,9 @@ def advance_recipe(session: Any) -> None:
 def status(session: Any) -> str:
     state = session.kitchen_state
     text = f"조리 진행도 {state.progress}% · 재료 상태 {state.quality}점"
+    if state.incident:
+        name, skills, penalty = INCIDENTS[state.incident]
+        text += f"\n【{name}】 {state.incident_due_round}라운드 끝까지 {' / '.join(skills)} · 실패 -2 / 방치 -{penalty}"
     if state.pot_warning:
         text += f"\n♨ 중간 조리 · {state.pot_warning_round + 1}라운드 냄비 차례까지 민첩·요리로 불을 줄이세요!"
     if state.seasoning:
@@ -157,17 +207,23 @@ def status(session: Any) -> str:
     return text
 
 
-def damage_note(target: Any, damage: int, weapon: Any = None) -> str:
+def damage_note(target: Any, damage: int, weapon: Any = None, source: Any = None) -> str:
     state = target.kitchen_owner
     kind = enemy_kind(target)
     if state is None or kind == "pot":
         return ""
     overkill = max(0, damage - max(0, target.hp))
-    state.quality = max(0, state.quality - overkill)
+    weapon_penalty = 2 if damage > 0 and source is not None and not source.enemy_id and weapon is not None and "비무장" not in weapon.name and not m.is_spell_weapon(weapon) else 0
+    state.quality = max(0, state.quality - overkill - weapon_penalty)
     if kind == "dough" and damage > 0 and weapon is not None:
         state.dough_touched = True
         state.dough_anger = min(3, state.dough_anger + 1)
-    return f" · 재료 상태 -{overkill} → {state.quality}점" if overkill else ""
+    reasons = []
+    if weapon_penalty:
+        reasons.append("무기 사용 -2")
+    if overkill:
+        reasons.append(f"초과 피해 -{overkill}")
+    return f" · 재료 상태 {' / '.join(reasons)} → {state.quality}점" if reasons else ""
 
 
 async def event(session: Any, text: str) -> None:
@@ -245,6 +301,7 @@ async def finish_if_decided(session: Any) -> bool:
         return False
     state.success = bool(players) and state.progress == 100 and not session.annihilated
     state.finished = True
+    clear_incident(state)
     state.damage_choice = None
     if state.success:
         for player in players:
@@ -447,6 +504,11 @@ def action_options(session: Any) -> list[discord.SelectOption]:
         skills = ["민첩", "예술/공예 | 요리"] if kind == "shrimp" else ["손놀림", "예술/공예 | 요리"]
         for skill in skills:
             options.append(discord.SelectOption(label=f"{target.field_symbol} {target.character_name} 손질 · {skill}"[:100], value=f"prep:{i}:{skill}", description="성공 시 초과 피해 없이 1d6+2 손질 · 턴 종료"))
+    if state.incident:
+        name, skills, penalty = INCIDENTS[state.incident]
+        for skill in skills:
+            options.append(discord.SelectOption(label=f"소동 해결 · {name} · {skill}"[:100], value=f"incident:{state.incident}:{skill}",
+                                                description=f"성공하면 해결 · 실패 재료 상태 -2 · 방치 -{penalty} · 턴 종료"))
     if state.pot_warning:
         for skill in ("민첩", "예술/공예 | 요리"):
             options.append(discord.SelectOption(label=f"불 줄이기 · {skill}", value=f"cool:{skill}", description="실패 1d3 화상·재료 상태 -3 · 다른 동료 재시도 가능"))
@@ -468,6 +530,8 @@ class KitchenActions(discord.ui.Select):
 async def skill_value(actor: Any, skill: str) -> int | None:
     if skill == "민첩":
         return actor.dexterity
+    if skill == "근력":
+        return actor.strength
     return await m.combat_skill_value(actor, skill)
 
 
@@ -500,6 +564,8 @@ async def use_action(session: Any, interaction: discord.Interaction, value: str,
         skill = "지능" if value == "season" else parts[-1]
         if value.startswith("prep:"):
             target = session.participants[int(parts[1])]
+        elif value.startswith("incident:"):
+            target = None
         else:
             target = next(p for p in session.participants if enemy_kind(p) == "pot")
         try:
@@ -514,7 +580,15 @@ async def use_action(session: Any, interaction: discord.Interaction, value: str,
         result = m.coc_combat_check_result(roll, score)
         success = m.combat_success_rank(result) > 0
         await event(session, f"{actor.character_name} · {skill} {m.combat_roll_text(actor, roll, rolls, modifier, session=session)} / {score} 【{result}】")
-        if value == "season":
+        if value.startswith("incident:"):
+            name = INCIDENTS[state.incident][0]
+            if success:
+                clear_incident(state)
+                await event(session, f"【소동 해결】 {name} 더 큰 사고는 막았어요!")
+            else:
+                state.quality = max(0, state.quality - 2)
+                await event(session, f"【해결 실패】 재료 상태 -2 → {state.quality}점 · 다른 동료가 다시 시도할 수 있어요!")
+        elif value == "season":
             state.seasoning = False
             state.quality = min(100, state.quality + 8) if success else max(0, state.quality - 10)
             await event(session, f"【간 맞추기】 재료 상태 {state.quality}점 · " + ("좋은 향이 나요!" if success else "…설탕이었나 봐요!"))

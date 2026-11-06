@@ -56,7 +56,7 @@ class KitchenRaidTests(unittest.TestCase):
             self.assertEqual([k.enemy_kind(p) for p in s.participants if p.enemy_id], ["dough"])
             dough = s.participants[2]
             m.apply_combat_damage(dough, dough.hp+5, s.participants[0], weapon=s.participants[0].weapons[1])
-            self.assertEqual(s.kitchen_state.quality, 95)
+            self.assertEqual(s.kitchen_state.quality, 93)
             self.assertFalse(await m.finish_combat_if_decided(s))
             self.assertEqual(s.kitchen_state.progress, 25)
             self.assertEqual(s.kitchen_state.next_ingredient, "noodle")
@@ -146,6 +146,76 @@ class KitchenRaidTests(unittest.TestCase):
                 self.assertEqual(s.phase, "combat")
         self.run_case(check)
 
+    def test_incident_spawn_deadline_and_timeout_are_once_per_round(self):
+        for key, (name, skills, penalty) in k.INCIDENTS.items():
+            s = fixture(staged=True)
+            k.clear_incident(s.kitchen_state)
+            s.kitchen_state.incident_last_round = 0
+            with patch.object(k.random, "random", return_value=0), patch.object(k.random, "choice", return_value=key):
+                k.process_round(s)
+                self.assertEqual(s.kitchen_state.incident, key)
+                self.assertEqual(s.kitchen_state.incident_due_round, 2)
+                self.assertIn(name, k.status(s))
+                options = {o.value for o in k.action_options(s)}
+                for skill in skills:
+                    self.assertIn(f"incident:{key}:{skill}", options)
+                s.round_number = 2
+                k.process_round(s)
+                self.assertEqual(s.kitchen_state.quality, 100)
+                s.round_number = 3
+                k.process_round(s)
+                self.assertEqual(s.kitchen_state.quality, 100-penalty)
+                self.assertFalse(s.kitchen_state.incident)
+                k.process_round(s)
+                self.assertEqual(s.kitchen_state.quality, 100-penalty)
+            m.combat_sessions.clear()
+
+    def test_incident_failure_then_other_player_success_has_no_hp_cost(self):
+        async def check():
+            s = fixture(staged=True)
+            s.kitchen_state.incident = "salt"
+            s.kitchen_state.incident_due_round = 2
+            with patch.object(m.registry, "get_skill_value", AsyncMock(return_value=65)), patch.object(m, "roll_combat_d100", side_effect=[(99, [99], 0), (1, [1], 0)]), patch.object(m, "repost_combat_turn", AsyncMock()), patch.object(m, "refresh_combat_turn_weapons", AsyncMock()):
+                await k.use_action(s, interaction(s), "incident:salt:손놀림", s.turn_serial)
+                self.assertEqual(s.kitchen_state.incident, "salt")
+                self.assertEqual(s.kitchen_state.quality, 98)
+                self.assertEqual(s.turn_index, 1)
+                await k.use_action(s, interaction(s, 2), "incident:salt:손놀림", s.turn_serial)
+                self.assertFalse(s.kitchen_state.incident)
+                self.assertEqual(s.kitchen_state.quality, 98)
+            self.assertEqual([p.hp for p in s.participants[:2]], [80, 80])
+        self.run_case(check)
+
+    def test_incident_chance_round_hook_and_intermission_exclusion(self):
+        s = fixture(staged=True)
+        k.clear_incident(s.kitchen_state)
+        s.kitchen_state.incident_last_round = 0
+        with patch.object(k.random, "random", return_value=0.25):
+            k.process_round(s)
+            self.assertFalse(s.kitchen_state.incident)
+        with patch.object(k.random, "random", return_value=0), patch.object(k.random, "choice", return_value="spice"):
+            s.turn_index = s.turn_order[-1]
+            m.advance_combat_turn(s)
+            self.assertEqual(s.kitchen_state.incident, "spice")
+            s.participants[2].hp = 0
+            k.begin_intermission(s)
+            self.assertFalse(s.kitchen_state.incident)
+            self.assertTrue(s.kitchen_state.pot_warning)
+            s.round_number += 1
+            k.process_round(s)
+            self.assertFalse(s.kitchen_state.incident)
+        m.combat_sessions.clear()
+
+    def test_weapon_penalty_adds_to_overkill_but_excludes_unarmed_and_spells(self):
+        for weapon, expected in [(m.CombatWeapon("검", "근접전 | 도검", "1d6"), 2), (m.CombatWeapon("권총", "사격 | 권총", "1d6"), 2),
+                                 (m.CombatWeapon("비무장", "근접전 | 격투", "1d3"), 0), (m.CombatWeapon("독안개", "주문", "1d3"), 0), (None, 0)]:
+            s = fixture(staged=True)
+            target = s.participants[2]
+            target.hp = 3
+            m.apply_combat_damage(target, 5, s.participants[0], weapon=weapon)
+            self.assertEqual(s.kitchen_state.quality, 98-expected)
+        m.combat_sessions.clear()
+
     def test_force_control_succeeds_or_fails_once(self):
         async def check():
             for roll, expected in [(1, True), (99, False)]:
@@ -176,7 +246,7 @@ class KitchenRaidTests(unittest.TestCase):
                 self.assertEqual(s.participants[2].hp, 3)
                 await view.choose(interaction(s), 2)
                 self.assertEqual(s.participants[2].hp, 1)
-                self.assertEqual(s.kitchen_state.quality, 100)
+                self.assertEqual(s.kitchen_state.quality, 98)
                 self.assertEqual(roll.call_count, 1)
                 await view.choose(interaction(s), 2)
                 self.assertEqual(s.participants[2].hp, 1)
@@ -199,7 +269,7 @@ class KitchenRaidTests(unittest.TestCase):
                 else:
                     self.assertIsNone(s.kitchen_state.damage_choice)
                     self.assertEqual(s.participants[2].hp, 0)
-                    self.assertEqual(s.kitchen_state.quality, 83)
+                    self.assertEqual(s.kitchen_state.quality, 81)
         self.run_case(check)
 
     def test_multiple_hits_each_get_their_own_damage_choice(self):

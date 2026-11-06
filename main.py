@@ -183,6 +183,7 @@ class CombatStatusSpec:
     kinds: tuple[str, ...]
     escape_skill: str
     escape_difficulty: int = 1
+    independent_hold: bool = False
 
 
 def parse_combat_statuses(damage: str) -> tuple[str, list[CombatStatusSpec]]:
@@ -1191,6 +1192,11 @@ class CombatParticipant:
     damage_dealt: int = 0
     damage_received: int = 0
     armor: int = 0
+    mana_barrier: int = 0
+    barrier_hits: int = 0
+    barrier_rebuild: bool = False
+    silenced: bool = False
+    guarded_round: int = 0
     enemy_skills: dict[str, int] = field(default_factory=dict)
     pattern_step: int = 0
     regeneration_used: bool = False
@@ -1241,6 +1247,7 @@ class PendingCombatAttack:
     spell_defense_value: int = 0
     spell_defenses: dict[int, int] = field(default_factory=dict)
     spell_result: str = ""
+    family_spell: str = ""
     spell_paid: bool = False
     spell_donations: dict[int, int] = field(default_factory=dict)
     spell_sacrifice: int | None = None
@@ -1290,6 +1297,13 @@ class CombatSession:
     dream_result: str = ""
     dream_events: list[DreamEvent] = field(default_factory=list)
     dream_difficulty: int = 1
+    family_spawned: bool = False
+    family_last_serial: int = -1
+    family_ops: list[dict[str, Any]] = field(default_factory=list)
+    family_events: list[dict[str, Any]] = field(default_factory=list)
+    family_mage_turns: int = 0
+    family_last_spell: str = ""
+    family_revenge: bool = False
 
 
 class CombatLogEntry(str):
@@ -1316,6 +1330,10 @@ RAID_ENEMIES = {
                 "fight": 50, "dodge": 25, "gun": 0, "luck": 50},
     "dream": {"name": "꿈꾸는 고치", "dex": 40, "con": 100, "str": 100, "size": 200,
               "fight": 30, "dodge": 0, "gun": 0, "luck": 70, "pow": 120, "dream_attack": 80},
+    "hunter": {"name": "딜리아", "dex": 75, "con": 85, "str": 75, "size": 70,
+               "fight": 90, "dodge": 75, "gun": 20, "luck": 76, "pow": 85},
+    "mage": {"name": "디안", "dex": 50, "con": 35, "str": 45, "size": 50,
+             "fight": 25, "dodge": 43, "gun": 20, "luck": 70, "pow": 95, "magic": 95},
     "minion": {"name": "실험체", "dex": 35, "con": 30, "str": 20, "size": 20,
                "fight": 35, "dodge": 15, "gun": 0, "luck": 30},
 }
@@ -1430,6 +1448,8 @@ def missing_compulsive_weapon(member: CombatParticipant) -> bool:
 def available_combat_weapon(session: CombatSession, index: int) -> bool:
     member = session.participants[session.turn_index]
     weapon = member.weapons[index]
+    if member.silenced and is_spell_weapon(weapon):
+        return False
     if member.dream_forbidden == (weapon.name, weapon.skill_reference):
         return member.madness == "강박" and member.compulsive_weapon == member.dream_forbidden
     if member.madness == "도주" or not compulsion_allows(member, weapon):
@@ -1497,6 +1517,13 @@ def make_raid_enemy(enemy_id: str) -> CombatParticipant:
 
 
 def randomize_raid_enemy(member: CombatParticipant, player_count: int) -> None:
+    if member.enemy_id in {"hunter", "mage"}:
+        member.enemy_skills = dict(RAID_ENEMIES[member.enemy_id])
+        member.max_hp = 15 if member.enemy_id == "hunter" else 8
+        member.magic_points = 17 if member.enemy_id == "hunter" else 19
+        if member.enemy_id == "mage":
+            member.mana_barrier = 40
+        return
     if member.enemy_id == "dream":
         member.enemy_skills = dict(RAID_ENEMIES["dream"])
         member.max_hp = max(60, 30 * player_count)
@@ -1548,6 +1575,8 @@ async def combat_skill_value(member: CombatParticipant, skill: str) -> int | Non
         return spec["gun"]
     if member.enemy_id == "dream" and skill == "꿈의 침식":
         return spec["dream_attack"]
+    if skill == "마법" and member.enemy_id == "mage":
+        return spec["magic"]
     if skill == "생체 공격":
         return spec["fight"]
     return 20
@@ -1556,6 +1585,12 @@ async def combat_skill_value(member: CombatParticipant, skill: str) -> int | Non
 async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) -> list[CombatWeapon]:
     if not member.enemy_id:
         return await registry.get_combat_weapons(member.character_value, refresh=refresh)
+    if member.enemy_id == "hunter":
+        return [CombatWeapon("비무장", "근접전 | 격투", "1d3", damage_bonus="DB"),
+                CombatWeapon("정글도", "근접전 | 격투", "1d8", damage_bonus="DB", impaling=True),
+                CombatWeapon("힘줄 베기", "근접전 | 격투", "1d4", damage_bonus="DB", effects=[CombatStatusSpec(("마비",), "건강")])]
+    if member.enemy_id == "mage":
+        return [CombatWeapon("비무장", "근접전 | 격투", "1d3"), CombatWeapon("마력탄", "마법", "1d4")]
     if member.enemy_id == "dream":
         return [CombatWeapon("비무장 · 그림자", "근접전 | 격투", "1d4"),
                 CombatWeapon("접히는 실", "꿈의 침식", "1d4"),
@@ -1582,6 +1617,14 @@ async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) ->
 
 
 def combat_opponents(session: CombatSession, first: int, second: int) -> bool:
+    if session.enemy_id == "hunter" and first != second:
+        a, b = session.participants[first], session.participants[second]
+        if a.enemy_id == "mage" or b.enemy_id == "mage":
+            return True
+        if a.enemy_id == "hunter" and not b.enemy_id:
+            return not (session.family_spawned and any(p.enemy_id == "mage" and combat_is_present(p) for p in session.participants))
+        if b.enemy_id == "hunter" and not a.enemy_id:
+            return True
     return first != second and (session.mode != "레이드" or
         bool(session.participants[first].enemy_id) != bool(session.participants[second].enemy_id))
 
@@ -1594,8 +1637,23 @@ def combat_is_active(member: CombatParticipant) -> bool:
     return combat_is_present(member) and not member.unconscious and not member.dream_asleep
 
 
-def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatParticipant, *, ignore_armor: bool = False) -> tuple[int, str]:
+def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatParticipant, *, ignore_armor: bool = False, weapon: CombatWeapon | None = None) -> tuple[int, str]:
     raw_damage = damage
+    if target.enemy_id == "mage" and target.mana_barrier > 0 and not ignore_armor:
+        shield_damage = max(0, damage) * (2 if source.enemy_id == "hunter" and weapon is not None and weapon.name == "정글도" else 1)
+        previous = target.mana_barrier
+        target.mana_barrier = max(0, previous - shield_damage)
+        target.damage_received += min(previous, shield_damage)
+        if source is not target:
+            source.damage_dealt += min(previous, shield_damage)
+        if weapon is not None and is_melee_weapon(weapon):
+            target.barrier_hits += 1
+            if target.barrier_hits >= 2:
+                target.mana_barrier = 0
+        if target.mana_barrier == 0:
+            target.barrier_rebuild = True
+            target.barrier_hits = 0
+        return 0, f"마력장벽 {previous} → {target.mana_barrier}" + (" · 【장벽 파괴】" if not target.mana_barrier else "")
     damage = max(0, damage - (0 if ignore_armor else target.armor))
     armor_text = f"장갑 {target.armor}: {raw_damage} → {damage} · " if target.armor and not ignore_armor else ""
     if target.enemy_id:
@@ -1639,7 +1697,7 @@ def maintaining_combat_shock(session: CombatSession | None, member: CombatPartic
         return False
     return any(
         combat_is_present(target) and any(
-            "충격" in effect.spec.kinds and session.participants[effect.source_index] is member
+            "충격" in effect.spec.kinds and not effect.spec.independent_hold and session.participants[effect.source_index] is member
             for effect in active_combat_statuses(session, target)
         ) for target in session.participants
     )
@@ -1655,7 +1713,13 @@ def releasable_combat_statuses(session: CombatSession, member: CombatParticipant
 def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: CombatSession | None = None, context: str = "", weapon: CombatWeapon | None = None) -> tuple[int, list[int], int]:
     modifier -= int(member.major_wound)
     modifier -= int(maintaining_combat_shock(session, member))
+    if session is not None and any(effect.spec.independent_hold and session.participants[effect.source_index] is member
+                                   for target in session.participants if combat_is_present(target)
+                                   for effect in active_combat_statuses(session, target)):
+        modifier -= 1
     modifier -= member.paralysis_stacks
+    if session is not None and context == "defense" and member.guarded_round > 0:
+        modifier += 1
     if member.dream_blind and context in {"attack", "spell_attack"}:
         modifier -= 1
     if member.madness == "심신성 장애" and context in {"attack", "defense", "spell_attack"}:
@@ -1786,7 +1850,7 @@ def end_combat_domination_turn(session: CombatSession, member: CombatParticipant
 def apply_combat_domination(session: CombatSession, attack: PendingCombatAttack) -> None:
     caster = session.participants[attack.attacker_index]
     target = session.participants[attack.target_index]
-    if target.enemy_id in {"chimera", "dream"}:
+    if target.enemy_id in {"chimera", "dream"} or (target.enemy_id == "mage" and target.mana_barrier > 0):
         append_combat_log(session, f"【지배 면역】 {target.character_name}")
         session.last_attack_events.append(f"{target.character_name} · 지배 면역")
         session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -1825,8 +1889,10 @@ def move_combat_position(session: CombatSession, mover: int, target: int, direct
 def separate_combat_boss_position(session: CombatSession) -> None:
     if session.mode != "레이드":
         return
+    allied_hunter = session.enemy_id == "hunter" and any(p.enemy_id == "mage" and combat_is_present(p) for p in session.participants)
     boss_positions = {member.position for member in session.participants
-                      if member.enemy_id and member.enemy_id != "minion" and combat_is_active(member)}
+                      if member.enemy_id and member.enemy_id != "minion" and combat_is_active(member)
+                      and not (allied_hunter and member.enemy_id == "hunter")}
     for member in session.participants:
         if not member.enemy_id and combat_is_present(member) and member.position in boss_positions:
             member.position -= 1
@@ -1854,6 +1920,7 @@ def render_combat_field(session: CombatSession) -> str:
     if not members:
         return "--------\n참가자 없음\n--------"
     hazards = {event.position for event in session.dream_events if event.kind == "pit" and event.position is not None}
+    hazards.update(event["position"] for event in session.family_events if event["kind"] == "pit")
     coordinates = [member.position for member in members] + list(hazards)
     positions = range(max(coordinates), min(coordinates) - 1, -1)
     current = session.participants[session.turn_index]
@@ -1890,6 +1957,9 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{'▶ ' if member is session.participants[session.turn_index] else ''}{member.field_symbol} {member.character_name} · 민첩 {member.dexterity}\n"
             f"{combat_hp_bar(member)} HP {member.hp}/{member.max_hp}"
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
+            f"{' · 마력장벽 ' + str(member.mana_barrier) if member.enemy_id == 'mage' else ''}"
+            f"{' · 침묵' if member.silenced else ''}"
+            f"{' · 반격 태세' if member.guarded_round > 0 else ''}"
             f"{' · 마력 ' + str(member.magic_points) if member.magic_points is not None else ''}"
             f"{' · 이성 ' + str(member.sanity) if member.sanity is not None else ''}"
             f"{' · 크기 ' + str(member.size) + ' · 체구 ' + str(member.build) if member.enemy_id == 'chimera' else ''}"
@@ -1928,6 +1998,8 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             enemy = ("\n상대: 연습용 허수아비 · HP·공격·회피·반격 없음\n모집자가 훈련 종료를 눌러 마칠 수 있어요."
                      if session.enemy_id == "dummy" else
                      "\n상대: 실험키메라 · 장갑 1 · 상태이상 면역\n시작 시 능력치·특수기 2개를 무작위로 정해요.\n10라운드부터 검은 안개 · 정신 판정 실패 시 피해")
+        if session.enemy_id == "hunter":
+            enemy = "\n상대: 딜리아와 디안 · 라운드 제한 없음\n3라운드 종료 후 디안 난입 · 두 명 모두 쓰러뜨리면 승리"
         if session.enemy_id == "dream":
             enemy = "\n상대: 꿈꾸는 고치 · 2인 이상 · 상태이상 면역\n고치 3라운드 후 부화 · 총 12라운드 생존\n요정 장난 30% 추가 등장"
         body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
@@ -1962,6 +2034,13 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
                 title = "두드리는 소리" if event.kind == "pulse" else "눈꺼풀 아래"
                 remaining = max(0, event.threshold - (dream_boss(session).damage_received - event.damage_start))
                 sections.append(f"【{title}】 다음 보스 차례 전 {remaining} 피해 더 주면 {'취소' if event.kind == 'pulse' else '약화'}")
+    if session.enemy_id == "hunter":
+        mage = next((p for p in session.participants if p.enemy_id == "mage"), None)
+        sections.append("디안 등장 전 · 딜리아의 체력을 남겨두면 후반에 도움을 받아요." if mage is None else
+                        "딜리아가 디안과 교전 중 · 공투 중에도 딜리아를 공격할 수 있어요." if combat_is_present(mage) else "디안 탈락 · 딜리아와 마지막 결전")
+        for event in session.family_events:
+            sections.append(f"【{event['name']} 예고】 다음 디안 차례에 발동 · " +
+                            (f"{session.participants[event['target']].character_name}에게서 떨어지세요." if event['kind'] == 'mark' else f"위치 {event['position']}에서 이동하세요."))
     if current.dream_betrayal:
         sections.append("【뒤바뀐 얼굴】 근거리의 가장 가까운 동료에게 자동 맨손 공격 · 동료가 없으면 해제")
     if session.initiative_logs:
@@ -2071,7 +2150,7 @@ def render_combat_winner(session: CombatSession) -> str:
             outcome = f"허수아비 훈련 종료 · 총 {total} 데미지!"
         else:
             players = any(not member.enemy_id for member in survivors)
-            enemies = any(member.enemy_id == "chimera" for member in survivors)
+            enemies = (not session.family_spawned or any(member.enemy_id in {"hunter", "mage"} for member in survivors)) if session.enemy_id == "hunter" else any(member.enemy_id == "chimera" for member in survivors)
             outcome = ("레이드 성공! 참가자 팀의 승리!" if players and not enemies else
                        "무승부 · 양쪽 모두 전투 탈락" if not players and not enemies else
                        "레이드 중단" if players and enemies else "레이드 실패 · 참가자 모두 전투 탈락")
@@ -2159,7 +2238,11 @@ async def finish_combat_if_decided(session: CombatSession) -> bool:
             await session.message.edit(content=render_dream_ending(session), view=None)
         return True
     survivors = [member for member in session.participants if combat_is_active(member)]
-    if session.mode == "레이드":
+    if session.enemy_id == "hunter":
+        update_family_alliance(session)
+        if any(not p.enemy_id for p in survivors) and (not session.family_spawned or any(p.enemy_id in {"hunter", "mage"} and combat_is_present(p) for p in session.participants)):
+            return False
+    elif session.mode == "레이드":
         boss_type = "chimera" if session.enemy_id == "chimera" else "dummy"
         if any(not member.enemy_id for member in survivors) and any(member.enemy_id == boss_type for member in survivors):
             return False
@@ -2267,6 +2350,8 @@ def advance_combat_turn(session: CombatSession) -> None:
                 session.dream_result = "success" if any(not p.enemy_id and combat_is_active(p) for p in session.participants) else "failure"
                 return
             session.round_number += 1
+            if session.enemy_id == "hunter" and session.round_number >= 4 and not session.family_spawned:
+                spawn_family_mage(session)
             if session.fog_start_round and session.round_number in CHIMERA_ROUND_WARNINGS:
                 append_combat_log(session, "【실험구역 경고】 " + CHIMERA_ROUND_WARNINGS[session.round_number])
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
@@ -2705,12 +2790,18 @@ async def repost_combat_turn(session: CombatSession) -> None:
         if await trigger_round_raid_attack(session):
             return
         current = session.participants[session.turn_index]
+        if await resolve_family_domination(session):
+            return
         if await resolve_dream_betrayal(session):
             return
         if not current.enemy_id or combat_is_controlled(session, session.turn_index):
             if current.enemy_id:
                 current.actions_left = 1
             break
+        if current.enemy_id in {"hunter", "mage"}:
+            await publish_combat_panel(session, None)
+            await take_family_turn(session)
+            return
         if current.enemy_id == "dream":
             await take_dream_turn(session)
             return
@@ -3083,7 +3174,7 @@ async def check_combat_major_wound(session: CombatSession, member: CombatPartici
 
 
 def apply_combat_weapon_statuses(session: CombatSession, attacker: CombatParticipant, target: CombatParticipant, weapon: CombatWeapon) -> None:
-    if target.enemy_id in {"chimera", "dream"}:
+    if target.enemy_id in {"chimera", "dream"} or (target.enemy_id == "mage" and target.mana_barrier > 0):
         if weapon.effects:
             labels = "·".join(dict.fromkeys(kind for spec in weapon.effects for kind in spec.kinds))
             text = f"【상태이상 면역】 {target.character_name} · {labels}"
@@ -3123,7 +3214,7 @@ async def apply_combat_hit_effects(session: CombatSession, attacker: CombatParti
         return
     source_index = next(i for i, item in enumerate(session.participants) if item is attacker)
     target_index = next(i for i, item in enumerate(session.participants) if item is target)
-    if target.enemy_id in {"chimera", "dream"} and weapon.effects:
+    if (target.enemy_id in {"chimera", "dream"} or (target.enemy_id == "mage" and target.mana_barrier > 0)) and weapon.effects:
         apply_combat_weapon_statuses(session, attacker, target, weapon)
         weapon = replace(weapon, effects=[])
 
@@ -3224,6 +3315,8 @@ async def start_combat_madness_turn(session: CombatSession, member: CombatPartic
 async def prepare_combat_status_turn(session: CombatSession) -> bool:
     for _ in range(len(session.participants)):
         member = session.participants[session.turn_index]
+        if member.enemy_id == "hunter" and session.family_last_serial != session.turn_serial:
+            member.guarded_round = 0
         await start_combat_madness_turn(session, member)
         member.status_effects = active_combat_statuses(session, member)
         for effect in member.status_effects[:]:
@@ -3253,6 +3346,7 @@ async def prepare_combat_status_turn(session: CombatSession) -> bool:
             return False
         if session.enemy_id == "dream":
             await end_dream_player_turn(session, member)
+        member.silenced = False
         end_combat_madness_turn(session, member)
         end_combat_domination_turn(session, member)
         if await finish_combat_if_decided(session):
@@ -3388,7 +3482,7 @@ class CombatLobbyView(discord.ui.View):
                         member.max_hp = 0
                     member.hp = member.max_hp
                     member.weapons = weapons
-                    member.magic_points = magic_by_member.get(id(member))
+                    member.magic_points = magic_by_member.get(id(member)) if not member.enemy_id else member.magic_points
                     member.defended_round = 0
                     member.cover_active = False
                     member.movement_choice = ""
@@ -4321,6 +4415,8 @@ class CombatView(CombatActionView):
         caster = session.participants[session.turn_index]
         weapon = caster.weapons[weapon_index]
         try:
+            if caster.silenced:
+                raise SheetError("침묵 상태에서는 주문을 사용할 수 없어요.")
             doom = weapon.damage.strip() == "멸망"
             targets = [session.turn_index] if doom else combat_targets(session, weapon)
             if doom or weapon.area:
@@ -4642,7 +4738,8 @@ class CombatView(CombatActionView):
                 weapon, attacker.strength, attacker.size,
                 critical=weapon.impaling and result in {"극단적 성공", "대성공"},
             )
-            damage, health_text = apply_combat_damage(target, damage, attacker)
+            barrier_protected = target.enemy_id == "mage" and target.mana_barrier > 0
+            damage, health_text = apply_combat_damage(target, damage, attacker, weapon=weapon)
             append_combat_log(session,
                 f"피해 {detail}\n"
                 f"【{damage} 피해】 {target.character_name} · {health_text}"
@@ -4654,7 +4751,10 @@ class CombatView(CombatActionView):
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
             await session.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
-            await apply_combat_hit_effects(session, attacker, target, weapon)
+            if not barrier_protected:
+                await apply_combat_hit_effects(session, attacker, target, weapon)
+            elif weapon.effects:
+                append_combat_log(session, f"【장벽 면역】 {target.character_name} · 부가 효과 차단")
             await check_combat_major_wound(session, target, damage)
             if not combat_is_active(target):
                 break
@@ -4666,6 +4766,8 @@ class CombatView(CombatActionView):
         session.pending_attack = None
         if resume is not None:
             session.turn_index = resume
+        if attack is not None and attack.family_spell and await continue_family_spell(session, attack):
+            return
         if attack is not None:
             weapon = session.participants[attack.attacker_index].weapons[attack.weapon_index]
             if is_spell_weapon(weapon) and weapon.area and await continue_combat_area_spell(session, attack):
@@ -4680,6 +4782,11 @@ class CombatView(CombatActionView):
                 await begin_raid_attack(session, attack.attacker_index, target_index, attack.weapon_index,
                                         modifier=modifier, remaining_targets=rest)
                 return
+        if session.enemy_id == "hunter" and not combat_is_active(session.participants[session.turn_index]):
+            session.family_ops.clear()
+        if session.enemy_id == "hunter" and session.family_ops and session.participants[session.turn_index].enemy_id in {"hunter", "mage"}:
+            await take_family_turn(session)
+            return
         if resume is not None:
             session.briefing = f"예고 공격이 끝났어요. 이제 {session.participants[resume].character_name}의 일반 행동을 시작해요!"
             await repost_combat_turn(session)
@@ -4698,6 +4805,7 @@ class CombatView(CombatActionView):
             session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
         if session.enemy_id == "dream":
             await end_dream_player_turn(session, current)
+        current.silenced = False
         end_combat_madness_turn(session, current)
         end_combat_domination_turn(session, current)
         advance_combat_turn(session)
@@ -5393,7 +5501,8 @@ class CombatDefenseView(CombatActionView):
             assert counter_weapon is not None
             damage, detail = roll_weapon_damage(counter_weapon, defender.strength, defender.size,
                                                critical=counter_weapon.impaling and result in {"극단적 성공", "대성공"})
-            damage, health_text = apply_combat_damage(attacker, damage, defender)
+            barrier_protected = attacker.enemy_id == "mage" and attacker.mana_barrier > 0
+            damage, health_text = apply_combat_damage(attacker, damage, defender, weapon=counter_weapon)
             append_combat_log(session,
                 f"{counter_weapon.name} 피해 {detail}\n"
                 f"【반격 성공 · {damage} 데미지!】 {attacker.character_name} · {health_text}"
@@ -5406,7 +5515,8 @@ class CombatDefenseView(CombatActionView):
             session.briefing = f"{defender.character_name}의 반격이 성공했어요. 피해를 적용하고 있어요."
             await session.message.edit(content=render_combat_session(session), view=None)
             await asyncio.sleep(0.7)
-            await apply_combat_hit_effects(session, defender, attacker, counter_weapon)
+            if not barrier_protected:
+                await apply_combat_hit_effects(session, defender, attacker, counter_weapon)
             await check_combat_major_wound(session, attacker, damage)
             turn_summary = f"{defender.character_name}의 반격이 성공했어요."
         else:
@@ -5417,6 +5527,355 @@ class CombatDefenseView(CombatActionView):
             turn_summary = f"{defender.character_name}의 반격이 통하지 않았어요."
 
         await CombatView(session).complete_attack_turn(turn_summary)
+
+
+
+FAMILY_SPELLS = {
+    "barrage": "마력 난사", "mark": "검은 낙인", "charm": "현혹의 속삭임",
+    "poison": "쇠약의 안개", "drain": "마력 약탈", "pit": "지면 파열",
+    "silence": "침묵의 봉인", "hold": "마력의 족쇄",
+}
+
+
+def spawn_family_mage(session: CombatSession) -> None:
+    if session.family_spawned:
+        return
+    session.family_spawned = True
+    mage = make_raid_enemy("mage")
+    randomize_raid_enemy(mage, 1)
+    spec = RAID_ENEMIES["mage"]
+    mage.dexterity, mage.strength, mage.constitution, mage.size = spec["dex"], spec["str"], spec["con"], spec["size"]
+    mage.spirit = 95
+    mage.hp = mage.max_hp
+    mage.weapons = [CombatWeapon("비무장", "근접전 | 격투", "1d3"), CombatWeapon("마력탄", "마법", "1d4")]
+    mage.position = max((p.position for p in session.participants if combat_is_present(p)), default=0) + 2
+    mage.field_symbol = "◆"
+    session.participants.append(mage)
+    append_combat_log(session, "마력이 전장을 뒤덮습니다. 딜리아가 디안에게 칼끝을 돌립니다.")
+    session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+
+
+def update_family_alliance(session: CombatSession) -> None:
+    if session.family_spawned and not session.family_revenge and not any(p.enemy_id == "mage" and combat_is_present(p) for p in session.participants):
+        session.family_revenge = True
+        session.family_events.clear()
+        if any(p.enemy_id == "hunter" and combat_is_present(p) for p in session.participants):
+            append_combat_log(session, "마력이 잦아듭니다. 딜리아가 다시 당신들을 바라봅니다.")
+        session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
+
+
+def family_targets(session: CombatSession, member: CombatParticipant) -> list[int]:
+    if member.enemy_id == "hunter":
+        mage = [i for i, p in enumerate(session.participants) if p.enemy_id == "mage" and combat_is_active(p)]
+        if mage:
+            return mage
+    return [i for i, p in enumerate(session.participants) if p is not member and combat_is_active(p)
+            and (not p.enemy_id or member.enemy_id == "mage")]
+
+
+def choose_family_spell(session: CombatSession, mage: CombatParticipant, targets: list[int]) -> tuple[str, int]:
+    # Every legal spell keeps a chance; tactical conditions increase its weight.
+    weights = {"barrage": 3, "mark": 1, "charm": 1, "poison": 2, "drain": 1, "pit": 1, "silence": 0, "hold": 1}
+    clustered = any(sum(abs(session.participants[j].position - session.participants[i].position) <= 1 for j in targets) >= 2 for i in targets)
+    casters = [i for i in targets if any(is_spell_weapon(w) for w in session.participants[i].weapons) and not session.participants[i].silenced]
+    rich = [i for i in targets if (session.participants[i].magic_points or 0) > 0]
+    melee = [i for i in targets if session.participants[i].enemy_id == "hunter" or any(is_melee_weapon(w) for w in session.participants[i].weapons)]
+    if clustered:
+        weights["mark"] += 4
+        weights["pit"] += 3
+    if any(session.participants[i].hp * 3 <= session.participants[i].max_hp for i in targets):
+        weights["barrage"] += 5
+    if mage.mana_barrier < 25 or (mage.magic_points or 0) < 8:
+        weights["drain"] += 6
+    if casters:
+        weights["silence"] = 5 + 3 * any(session.participants[i].last_used_weapon and session.participants[i].last_used_weapon[1] == "주문" for i in casters)
+    if melee:
+        weights["hold"] += 4
+    if not rich:
+        weights["drain"] = 0
+    if session.family_events:
+        weights["mark"] = weights["pit"] = 0
+    if any(e.spec.independent_hold for p in session.participants for e in active_combat_statuses(session, p)):
+        weights["hold"] = 0
+    weights[session.family_last_spell] = 0
+    for key in weights:
+        if (3 if key in {"mark", "pit", "poison"} else 2) > (mage.magic_points or 0):
+            weights[key] = 0
+    keys = [key for key, value in weights.items() if value > 0]
+    key = random.choices(keys, weights=[weights[k] for k in keys], k=1)[0]
+    pool = casters if key == "silence" else rich if key == "drain" else melee if key == "hold" else targets
+    if key == "barrage" and any(session.participants[i].hp * 3 <= session.participants[i].max_hp for i in targets):
+        pool = [min(targets, key=lambda i: session.participants[i].hp)]
+    if key in {"mark", "pit"}:
+        density = max(sum(abs(session.participants[j].position - session.participants[i].position) <= (1 if key == "mark" else 0) for j in targets) for i in targets)
+        pool = [i for i in targets if sum(abs(session.participants[j].position - session.participants[i].position) <= (1 if key == "mark" else 0) for j in targets) == density]
+    return key, random.choice(pool)
+
+
+async def family_spell_value(session: CombatSession, target: int, key: str) -> int:
+    member = session.participants[target]
+    value = member.constitution if key == "poison" else await combat_skill_value(member, "정신")
+    if value is None:
+        raise SheetError("주문 방어에 필요한 특성치를 읽지 못했어요.")
+    return value
+
+
+async def take_family_turn(session: CombatSession) -> None:
+    actor = session.participants[session.turn_index]
+    if session.family_last_serial != session.turn_serial:
+        session.family_last_serial = session.turn_serial
+        session.family_ops.clear()
+        actor.guarded_round = 0
+        if combat_is_shocked(session, actor):
+            for effect in active_combat_statuses(session, actor)[:]:
+                if "충격" in effect.spec.kinds:
+                    await attempt_combat_status_escape(session, actor, effect)
+            await CombatView(session).complete_attack_turn("충격 탈출 판정으로 차례를 마쳤어요.")
+            return
+        if maintaining_combat_shock(session, actor):
+            await CombatView(session).complete_attack_turn("구속을 유지하고 있어요.")
+            return
+        targets = family_targets(session, actor)
+        if not targets:
+            await CombatView(session).complete_attack_turn()
+            return
+        if actor.enemy_id == "hunter":
+            actor.pattern_step += 1
+            phase = (actor.pattern_step - 1) % 4
+            target = actor.hunt_target if phase != 0 and actor.hunt_target in targets else random.choice(targets)
+            gap_before_move = abs(actor.position - session.participants[target].position)
+            if phase == 2 and not any(session.participants[i].enemy_id == "mage" for i in targets):
+                actor.guarded_round = session.round_number
+                await show_raid_event(session, "【반격 태세】 딜리아가 칼을 세웁니다. 다음 자기 차례까지 회피 보너스 +1")
+                await CombatView(session).complete_attack_turn("딜리아가 방어에 집중했어요.")
+                return
+            if phase == 0 and not any(session.participants[i].enemy_id == "mage" for i in targets):
+                actor.hunt_target = target
+                actor.round_attack_distance = abs(actor.position - session.participants[target].position)
+                await show_raid_event(session, f"【사냥감 지목】 {session.participants[target].character_name} · 다음 추격 전 거리를 벌리면 공격 패널티 +1")
+            if combat_distance(session, session.turn_index, target) != "근거리":
+                roll, rolls, modifier = roll_combat_d100(actor, session=session)
+                move_combat_position(session, session.turn_index, target, -1, adjacent=True)
+                success = combat_success_rank(coc_combat_check_result(roll, actor.dexterity)) > 0
+                await show_raid_event(session, f"민첩 {combat_roll_text(actor, roll, rolls, modifier, session=session)} / {actor.dexterity}\n【파고들기 {'성공' if success else '실패'}】 딜리아")
+                if not success:
+                    await CombatView(session).complete_attack_turn("접근했지만 공격하지 못했어요.")
+                    return
+            weapon = 2 if phase == 3 and session.participants[target].enemy_id != "mage" else 1
+            penalty = -1 if phase == 1 and gap_before_move > actor.round_attack_distance else 0
+            await begin_raid_attack(session, session.turn_index, target, weapon, modifier=penalty)
+            return
+        session.family_mage_turns += 1
+        for event in session.family_events[:]:
+            if event["due"] <= session.family_mage_turns:
+                session.family_events.remove(event)
+                session.family_ops.append({"kind": "hazard", "event": event})
+        if actor.barrier_rebuild:
+            session.family_ops.append({"kind": "rebuild"})
+        elif (actor.magic_points or 0) < 2:
+            session.family_ops.append({"kind": "recharge"})
+        else:
+            key, target = choose_family_spell(session, actor, targets)
+            session.family_ops.append({"kind": "cast", "spell": key, "target": target})
+    while session.family_ops:
+        op = session.family_ops[0]
+        if op["kind"] == "cast" and op["spell"] in {"charm", "poison", "drain", "silence", "hold"}:
+            targets = family_targets(session, actor) if op["spell"] == "poison" else [op["target"]]
+            try:
+                values = {i: await family_spell_value(session, i, op["spell"]) for i in targets if combat_is_active(session.participants[i])}
+            except Exception as exc:
+                print(f"Family raid spell read failed ({type(exc).__name__}).")
+                session.briefing = "방어 값을 읽지 못했어요. 다시 시도해 주세요."
+                await publish_combat_panel(session, FamilyRetryView(session))
+                return
+            op["values"] = values
+        session.family_ops.pop(0)
+        if op["kind"] == "hazard":
+            event = op["event"]
+            center = session.participants[event["target"]].position if event["kind"] == "mark" else event["position"]
+            for i in family_targets(session, actor):
+                member = session.participants[i]
+                if abs(member.position - center) > (1 if event["kind"] == "mark" else 0):
+                    continue
+                raw, detail = roll_damage_formula("2d4" if event["kind"] == "mark" else "2d6")
+                damage, health = apply_combat_damage(member, raw, actor)
+                session.last_attack = event["name"]
+                session.last_attack_events.append(f"{member.character_name} · {damage} 피해 · {health}")
+                await show_raid_event(session, f"{detail}\n【{event['name']} · {damage} 피해】 {member.character_name} · {health}")
+                await check_combat_major_wound(session, member, damage)
+            if await finish_combat_if_decided(session):
+                return
+            continue
+        if op["kind"] == "rebuild":
+            actor.mana_barrier = 20
+            actor.barrier_hits = 0
+            actor.barrier_rebuild = False
+            await show_raid_event(session, "【마나장벽 재생】 내구도 20 · 디안은 공격하지 않습니다.")
+            continue
+        if op["kind"] == "recharge":
+            actor.magic_points = min(19, (actor.magic_points or 0) + 5)
+            await show_raid_event(session, f"【마력 회복】 디안 · 마력 {actor.magic_points} · 공격 없음")
+            continue
+        key, target = op["spell"], op["target"]
+        session.family_last_spell = key
+        actor.magic_points = max(0, (actor.magic_points or 0) - (3 if key in {"mark", "pit", "poison"} else 2))
+        if key in {"mark", "pit"}:
+            event = {"kind": key, "name": FAMILY_SPELLS[key], "target": target,
+                     "position": session.participants[target].position, "due": session.family_mage_turns + 1}
+            session.family_events.append(event)
+            await show_raid_event(session, f"【{event['name']} 예고】 다음 디안 차례에 발동!\n" +
+                                  (f"{session.participants[target].character_name}에게서 떨어지세요." if key == "mark" else f"위치 {event['position']}에서 이동하세요."))
+            continue
+        if key == "barrage":
+            pool = family_targets(session, actor)
+            if pool:
+                shots = [target] + [random.choice(pool) for _ in range(2)]
+                await begin_raid_attack(session, session.turn_index, shots[0], 1, remaining_targets=shots[1:])
+                return
+            continue
+        values = op["values"]
+        if not values:
+            continue
+        target, *rest = list(values)
+        roll, rolls, modifier = (0, [], 0) if key == "poison" else roll_combat_d100(actor, session=session, context="spell_attack")
+        result = "보통 성공" if key == "poison" else coc_combat_check_result(roll, 95)
+        session.last_attack = f"디안 · {FAMILY_SPELLS[key]}"
+        session.last_attack_events = []
+        if key != "poison":
+            await show_raid_event(session, f"마법 {combat_roll_text(actor, roll, rolls, modifier, session=session)} / 95 【{result}】\n{FAMILY_SPELLS[key]}")
+        session.pending_attack = PendingCombatAttack(session.turn_index, target, 0, 95, 1, stage="defense", family_spell=key,
+                                                    spell_result=result, spell_defenses=values, spell_defense_value=values[target], remaining_targets=rest)
+        await present_family_spell(session)
+        return
+    await CombatView(session).complete_attack_turn("디안의 주문이 끝났어요.")
+
+
+async def present_family_spell(session: CombatSession) -> None:
+    attack = session.pending_attack
+    if attack is None:
+        return
+    member = session.participants[attack.target_index]
+    label = "건강 판정" if attack.family_spell == "poison" else "정신 대항"
+    session.briefing = f"{member.character_name} · {FAMILY_SPELLS[attack.family_spell]} · {label}"
+    await session.message.edit(content=render_combat_session(session), view=FamilySpellView(session))
+    if member.enemy_id:
+        await resolve_family_spell(session)
+
+
+async def continue_family_spell(session: CombatSession, attack: PendingCombatAttack) -> bool:
+    remaining = [i for i in attack.remaining_targets if combat_is_active(session.participants[i])]
+    if not remaining:
+        return False
+    target, *rest = remaining
+    session.pending_attack = replace(attack, target_index=target, remaining_targets=rest, stage="defense", spell_defense_value=attack.spell_defenses[target])
+    await present_family_spell(session)
+    return True
+
+
+async def resolve_family_spell(session: CombatSession) -> None:
+    attack = session.pending_attack
+    if attack is None or attack.stage != "defense":
+        return
+    attack.stage = "resolving"
+    source = session.participants[attack.attacker_index]
+    target = session.participants[attack.target_index]
+    key = attack.family_spell
+    roll, rolls, modifier = roll_combat_d100(target, session=session, context="" if key == "poison" else "spirit")
+    result = coc_combat_check_result(roll, attack.spell_defense_value)
+    rank = combat_success_rank(result)
+    blocked = rank > 0 if key == "poison" else combat_success_rank(attack.spell_result) == 0 or rank >= combat_success_rank(attack.spell_result)
+    await show_raid_event(session, f"{target.character_name} · {'건강' if key == 'poison' else '정신'} {combat_roll_text(target, roll, rolls, modifier, session=session)} / {attack.spell_defense_value}\n【{result} · {'방어 성공' if blocked else FAMILY_SPELLS[key]}】")
+    if not blocked:
+        if key == "poison":
+            raw, detail = roll_damage_formula("1d3")
+            damage, health = apply_combat_damage(target, raw, source)
+            target.paralysis_stacks = min(2, target.paralysis_stacks + 1)
+            target.paralysis_skip_end_serial = -1
+            await show_raid_event(session, f"{detail}\n【쇠약의 안개 · {damage} 피해 · 마비】 {target.character_name} · {health}")
+            await check_combat_major_wound(session, target, damage)
+        elif key == "silence":
+            target.silenced = True
+            await show_raid_event(session, f"【침묵의 봉인】 {target.character_name} · 다음 자기 차례 종료까지 주문 불가")
+        elif key == "drain":
+            amount = min(target.magic_points or 0, random.randint(1, 4))
+            target.magic_points = (target.magic_points or 0) - amount
+            source.magic_points = min(19, (source.magic_points or 0) + amount)
+            source.mana_barrier = min(40, source.mana_barrier + amount)
+            await show_raid_event(session, f"【마력 약탈】 {target.character_name} 마력 -{amount} · 마나장벽 {source.mana_barrier}")
+        elif key == "charm":
+            apply_combat_domination(session, attack)
+        elif key == "hold":
+            spec = CombatStatusSpec(("충격",), "정신", independent_hold=True)
+            weapon = CombatWeapon("마력의 족쇄", "주문", "0", effects=[spec])
+            apply_combat_weapon_statuses(session, source, target, weapon)
+    await CombatView(session).complete_attack_turn("주문 방어 판정이 끝났어요.")
+
+
+async def resolve_family_domination(session: CombatSession) -> bool:
+    member = session.participants[session.turn_index]
+    source = member.domination_source
+    if source is None or session.participants[source].enemy_id != "mage" or not combat_is_controlled(session, session.turn_index):
+        return False
+    if combat_is_shocked(session, member) or pending_combat_status_check(session, member):
+        return False
+    targets = [i for i, p in enumerate(session.participants) if p is not member and i != source and combat_is_active(p)
+               and combat_distance(session, session.turn_index, i) == "근거리"]
+    weapon_index = next((i for i, w in enumerate(member.weapons) if "비무장" in w.name and is_melee_weapon(w)), None)
+    if not targets or weapon_index is None or maintaining_combat_shock(session, member):
+        await CombatView(session).complete_attack_turn("【현혹】 공격할 근거리 대상이 없어 차례를 마쳤어요.")
+        return True
+    target = random.choice(targets)
+    weapon = member.weapons[weapon_index]
+    try:
+        value = await combat_skill_value(member, normalize_weapon_skill_reference(weapon.skill_reference))
+        if value is None:
+            raise SheetError("현혹된 맨손 공격 값을 읽지 못했어요.")
+    except Exception as exc:
+        print(f"Family dominated attack read failed ({type(exc).__name__}).")
+        session.briefing = "현혹된 맨손 공격 값을 읽지 못했어요. 다시 시도해 주세요."
+        await publish_combat_panel(session, FamilyRetryView(session))
+        return True
+    session.pending_attack = PendingCombatAttack(session.turn_index, target, weapon_index, value, 1, fumble_weapon=weapon)
+    session.last_attack = f"【현혹】 {member.character_name} → {session.participants[target].character_name} · 맨손 공격"
+    session.last_attack_events = []
+    await publish_combat_panel(session, None)
+    await CombatView(session).process_pending_attack()
+    return True
+
+
+class FamilyRetryView(CombatActionView):
+    @discord.ui.button(label="주문 처리 재시도", style=discord.ButtonStyle.primary)
+    async def retry(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        async with self.session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            if interaction.user.id != self.session.owner_id:
+                await interaction.response.send_message("모집한 사람이 재시도해 주세요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            if combat_is_controlled(self.session, self.session.turn_index):
+                await repost_combat_turn(self.session)
+            else:
+                await take_family_turn(self.session)
+
+
+class FamilySpellView(CombatActionView):
+    def __init__(self, session: CombatSession) -> None:
+        super().__init__(session)
+        if session.pending_attack.family_spell == "poison":
+            self.resist.label = "건강 판정"
+
+    @discord.ui.button(label="정신 대항", style=discord.ButtonStyle.primary)
+    async def resist(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        async with self.session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            attack = self.session.pending_attack
+            if interaction.user.id != self.session.participants[attack.target_index].user_id:
+                await interaction.response.send_message("해당 대상만 판정할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            await resolve_family_spell(self.session)
 
 
 
@@ -5495,7 +5954,8 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
 @app_commands.rename(raid="레이드")
 @app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy"),
                            app_commands.Choice(name="실험키메라", value="chimera"),
-                           app_commands.Choice(name="꿈꾸는 고치", value="dream")])
+                           app_commands.Choice(name="꿈꾸는 고치", value="dream"),
+                           app_commands.Choice(name="딜리아와 디안", value="hunter")])
 @app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.")
 async def combat_command(
     interaction: discord.Interaction,

@@ -1194,7 +1194,6 @@ class CombatParticipant:
     armor: int = 0
     mana_barrier: int = 0
     mana_barrier_max: int = 40
-    barrier_hits: int = 0
     barrier_rebuild: bool = False
     silenced: bool = False
     guarded_round: int = 0
@@ -1647,13 +1646,8 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
         target.damage_received += min(previous, shield_damage)
         if source is not target:
             source.damage_dealt += min(previous, shield_damage)
-        if weapon is not None and is_melee_weapon(weapon):
-            target.barrier_hits += 1
-            if target.barrier_hits >= 3:
-                target.mana_barrier = 0
         if target.mana_barrier == 0:
             target.barrier_rebuild = True
-            target.barrier_hits = 0
         return 0, f"마력장벽 {previous} → {target.mana_barrier}" + (" · 【장벽 파괴】" if not target.mana_barrier else "")
     damage = max(0, damage - (0 if ignore_armor else target.armor))
     armor_text = f"장갑 {target.armor}: {raw_damage} → {damage} · " if target.armor and not ignore_armor else ""
@@ -5720,7 +5714,6 @@ async def take_family_turn(session: CombatSession) -> None:
             continue
         if op["kind"] == "rebuild":
             actor.mana_barrier = actor.mana_barrier_max
-            actor.barrier_hits = 0
             actor.barrier_rebuild = False
             await show_raid_event(session, f"【마나장벽 복구】 내구도 {actor.mana_barrier_max} · 디안이 주문을 이어갑니다.")
             continue

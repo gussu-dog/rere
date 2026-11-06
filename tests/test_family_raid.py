@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import main as m
 
 def fixture():
-    ps = [m.CombatParticipant(i, str(i), str(i), f'PC{i}', dexterity=80 - i, strength=60, constitution=60, size=60, hp=80, max_hp=80, spirit=65, sanity=65, starting_sanity=65, magic_points=10, position=0, weapons=[m.CombatWeapon('비무장', '근접전 | 격투', '1d3'), m.CombatWeapon('검', '근접전 | 격투', '2')]) for i in (1, 2, 3)]
+    ps = [m.CombatParticipant(i, str(i), str(i), f'PC{i}', dexterity=80 - i, strength=60, constitution=60, size=60, hp=80, max_hp=80, spirit=65, sanity=65, starting_sanity=65, magic_points=10, position=0, weapons=[m.CombatWeapon('비무장', '근접전 | 격투', '1d3'), m.CombatWeapon('검', '근접전 | 격투', '1d6')]) for i in (1, 2, 3)]
     h = m.make_raid_enemy('hunter')
     m.randomize_raid_enemy(h, 3)
     h.hp = h.max_hp
@@ -37,11 +37,15 @@ async def check():
     dmg, text = m.apply_combat_damage(b, 8, h, weapon=blade)
     assert dmg == 0 and b.hp == 8 and (b.mana_barrier == 24)
     m.apply_combat_damage(b, 1, s.participants[0], weapon=s.participants[0].weapons[0])
-    assert b.mana_barrier == 23 and b.hp == 8 and b.barrier_hits == 2
+    assert b.mana_barrier == 23 and b.hp == 8
     m.apply_combat_damage(b, 1, s.participants[0], weapon=s.participants[0].weapons[0])
+    assert b.mana_barrier == 22 and b.hp == 8 and not b.barrier_rebuild
+    for _ in range(3):
+        m.apply_combat_damage(b, 1, s.participants[0], weapon=s.participants[0].weapons[0])
+    assert b.mana_barrier == 19 and not b.barrier_rebuild
+    m.apply_combat_damage(b, 19, s.participants[0], weapon=s.participants[0].weapons[0])
     assert b.mana_barrier == 0 and b.hp == 8 and b.barrier_rebuild
     b.mana_barrier = 3
-    b.barrier_hits = 0
     m.apply_combat_damage(b, 100, s.participants[0])
     assert b.hp == 8 and b.mana_barrier == 0
     b.mana_barrier = 40
@@ -70,7 +74,7 @@ async def check():
         s.family_events = [{'kind': 'pit'}]
         key, target = m.choose_family_spell(s, b, m.family_targets(s, b))
         assert key not in {'barrage', 'mark', 'pit'} and target != 4
-    print('PASS: delayed spawn preserves hunter state, HP8/barrier40, doubled machete damage, three melee hits, no overflow, status immunity, alliance reversal and two-boss victory, early hunter defeat, AI constraints')
+    print('PASS: delayed spawn preserves hunter state, HP8/barrier40, doubled machete damage, damage-only barrier depletion, no overflow, status immunity, alliance reversal and two-boss victory, early hunter defeat, AI constraints')
 
 async def simulate():
     for seed in range(12):
@@ -86,7 +90,7 @@ async def simulate():
         def interact(user):
             return NS(user=NS(id=user), message=s.message, response=NS(defer=AsyncMock(), send_message=AsyncMock(), edit_message=AsyncMock(), is_done=lambda: True), followup=NS(send=AsyncMock()))
         with patch.object(m, 'publish_combat_panel', publish), patch.object(m, 'refresh_combat_turn_weapons', AsyncMock()), patch.object(m.registry, 'resolve_character_reference', AsyncMock(return_value=None)), patch.object(m.registry, 'get_skill_value', AsyncMock(return_value=65)), patch.object(m.registry, 'get_combat_weapons', AsyncMock(return_value=s.participants[0].weapons)):
-            while s.phase == 'combat' and steps < 220:
+            while s.phase == 'combat' and steps < 500:
                 steps += 1
                 if s.pending_attack:
                     attack = s.pending_attack

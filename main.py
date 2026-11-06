@@ -1159,6 +1159,7 @@ class CombatParticipant:
     fog_checked_round: int = 0
     unconscious: bool = False
     forfeited: bool = False
+    sacrificed: bool = False
     status_effects: list[CombatStatusEffect] = field(default_factory=list)
     enemy_id: str = ""
     damage_dealt: int = 0
@@ -1206,9 +1207,14 @@ class PendingCombatAttack:
     resume_turn_index: int | None = None
     remaining_targets: list[int] = field(default_factory=list)
     spell_costs: dict[str, int] = field(default_factory=dict)
+    spell_deferred_costs: dict[str, str] = field(default_factory=dict)
     spell_defense_value: int = 0
     spell_result: str = ""
     spell_paid: bool = False
+    spell_donations: dict[int, int] = field(default_factory=dict)
+    spell_sacrifice: int | None = None
+    spell_requested_donor: int | None = None
+    spell_request_serial: int = 0
 
 
 @dataclass
@@ -1489,7 +1495,7 @@ def combat_opponents(session: CombatSession, first: int, second: int) -> bool:
 
 
 def combat_is_present(member: CombatParticipant) -> bool:
-    return (member.enemy_id == "dummy" or member.hp > 0) and not member.forfeited
+    return (member.enemy_id == "dummy" or member.hp > 0) and not member.forfeited and not member.sacrificed
 
 
 def combat_is_active(member: CombatParticipant) -> bool:
@@ -1596,7 +1602,39 @@ def is_spell_weapon(weapon: CombatWeapon) -> bool:
     return weapon.skill_reference.strip() == "주문"
 
 
-def roll_spell_costs(text: str) -> dict[str, int]:
+def spell_mana_sources(session: CombatSession, *, corpses: bool = False) -> list[int]:
+    caster = session.participants[session.turn_index]
+    if corpses:
+        return [i for i, member in enumerate(session.participants) if not member.enemy_id
+                and member is not caster and member.hp <= 0 and not member.forfeited and not member.sacrificed
+                and (member.magic_points or 0) > 0]
+    return [i for i, member in enumerate(session.participants) if not member.enemy_id
+            and member is not caster and session.mode == "레이드" and combat_is_active(member)
+            and (member.magic_points or 0) > 0]
+
+
+def spell_funding_hp(session: CombatSession, attack: PendingCombatAttack) -> int:
+    caster = session.participants[attack.attacker_index]
+    corpse_mp = (session.participants[attack.spell_sacrifice].magic_points or 0) if attack.spell_sacrifice is not None else 0
+    return max(0, attack.spell_costs.get("마력", 0) - sum(attack.spell_donations.values()) - (caster.magic_points or 0) - corpse_mp)
+
+
+def spell_funding_prompt(session: CombatSession) -> str:
+    attack = session.pending_attack
+    if attack is None:
+        return ""
+    weapon = session.participants[attack.attacker_index].weapons[attack.weapon_index]
+    text = "주문 대가: " + (weapon.spell_cost_text or "없음")
+    if attack.spell_donations:
+        text += "\n마력 제공: " + " · ".join(f"{session.participants[i].character_name} {amount}" for i, amount in attack.spell_donations.items())
+    if attack.spell_sacrifice is not None:
+        corpse = session.participants[attack.spell_sacrifice]
+        text += f"\n제물: {corpse.character_name} · 남은 마력 {corpse.magic_points} 전부"
+    hp = spell_funding_hp(session, attack)
+    return text + (f"\n마력이 {hp} 부족해요. 대신 HP {hp}을 소모해서 시전할까요?" if hp else "\n시전할까요?")
+
+
+def roll_spell_costs(text: str, deferred: dict[str, str] | None = None) -> dict[str, int]:
     costs = {}
     for item in re.split(r"[,，;；]", text.replace("：", ":")):
         if not item.strip():
@@ -1610,7 +1648,11 @@ def roll_spell_costs(text: str) -> dict[str, int]:
         dice = re.match(r"(\d+)d(\d+)", formula)
         if dice and (int(dice.group(1)) < 1 or int(dice.group(2)) < 1):
             raise SheetError("주문 대가의 주사위 개수와 면 수는 1 이상이어야 해요.")
-        costs[resource] = roll_damage_formula(formula)[0]
+        if deferred is not None and resource != "마력" and "d" in formula:
+            deferred[resource] = formula
+            costs[resource] = 0
+        else:
+            costs[resource] = roll_damage_formula(formula)[0]
     return costs
 
 
@@ -1709,7 +1751,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 충격 유지' if maintaining_combat_shock(session, member) else ''}"
             f"{' · 충격' if combat_is_shocked(session, member) and combat_is_active(member) else ''}"
             f"{' · 지속' if combat_is_active(member) and any('지속' in effect.spec.kinds for effect in active_combat_statuses(session, member)) else ''}"
-            f"{' · 기권' if member.forfeited else ' · 기절' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''}")
+            f"{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 기절' if member.unconscious else ' · 전투불능' if member.hp <= 0 else ''}")
             for member in roster_members
         )
     else:
@@ -1788,7 +1830,7 @@ def record_combat_elimination(session: CombatSession, member: CombatParticipant)
 
 def render_combat_ranking(session: CombatSession) -> str:
     if session.mode == "레이드":
-        lines = [f"{member.character_name} · 입힌 피해 {member.damage_dealt} · HP {member.hp}{' · 기권' if member.forfeited else ' · 기절' if member.unconscious else ''}"
+        lines = [f"{member.character_name} · 입힌 피해 {member.damage_dealt} · HP {member.hp}{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 기절' if member.unconscious else ''}"
                  for member in session.participants if not member.enemy_id]
         return "참가자 결과\n" + "\n".join(lines)
     active = sorted((member for member in session.participants if combat_is_active(member)), key=lambda member: member.hp, reverse=True)
@@ -1808,7 +1850,7 @@ def render_combat_ranking(session: CombatSession) -> str:
         lines.append(f"{position}위 {member.character_name} · HP {member.hp} · 기절")
     for position, member in enumerate(eliminated, start=len(active) + len(unconscious) + 1):
         rank = "공동 1위" if all_draw else f"{position}위"
-        state = "기권" if member.forfeited else "HP 0 · 탈락"
+        state = "기권" if member.forfeited else "제물" if member.sacrificed else "HP 0 · 탈락"
         lines.append(f"{rank} {member.character_name} · {state}")
     return "최종 순위\n" + "\n".join(lines)
 
@@ -2698,10 +2740,10 @@ class CombatLobbyView(discord.ui.View):
 
                 combat_data = await asyncio.gather(*(load_combat_data(member) for member in session.participants))
                 magic_users = [member for member, data in zip(session.participants, combat_data)
-                               if not member.enemy_id and any(weapon.magic_ammo for weapon in data[4])]
+                               if not member.enemy_id]
                 magic_values = await asyncio.gather(*(registry.get_combat_magic_points(member.character_value) for member in magic_users))
                 if any(value is None for value in magic_values):
-                    await interaction.followup.send("마력 충전 무기를 가진 캐릭터의 현재 마력을 읽지 못했어요. 시트의 마력 현재값을 확인한 뒤 다시 시작해 주세요.", ephemeral=True)
+                    await interaction.followup.send("현재 마력을 읽지 못했어요. 시트의 마력 현재값을 확인한 뒤 다시 시작해 주세요.", ephemeral=True)
                     return
                 magic_by_member = {id(member): value for member, value in zip(magic_users, magic_values)}
                 sane_players = [member for member in session.participants if not member.enemy_id]
@@ -2757,6 +2799,7 @@ class CombatLobbyView(discord.ui.View):
                     member.fog_checked_round = 0
                     member.unconscious = False
                     member.forfeited = False
+                    member.sacrificed = False
                     member.status_effects = []
                     member.paralysis_stacks = 0
                     member.paralysis_skip_end_serial = -1
@@ -3525,7 +3568,8 @@ class CombatView(CombatActionView):
             if (not re.fullmatch(r"\d*[dD]\d+(?:[+-]\d+)?|\d+", weapon.damage.replace(" ", ""))
                     and not (weapon.damage == "0" and weapon.effects)):
                 raise SheetError("주문의 피해식이나 효과를 먼저 적어 주세요.")
-            costs = roll_spell_costs(weapon.spell_cost_text)
+            deferred = {}
+            costs = roll_spell_costs(weapon.spell_cost_text, deferred)
             if "마력" in costs and caster.magic_points is None:
                 caster.magic_points = await registry.get_combat_magic_points(caster.character_value)
                 if caster.magic_points is None:
@@ -3537,13 +3581,13 @@ class CombatView(CombatActionView):
             if costs.get("정신", 0) > spirit:
                 raise SheetError("주문 대가로 사용할 정신이 부족해요.")
             hp_cost = max(0, costs.get("마력", 0) - (caster.magic_points or 0))
-            if hp_cost > caster.hp:
+            if hp_cost > caster.hp and not spell_mana_sources(session) and not spell_mana_sources(session, corpses=True):
                 raise SheetError(f"마력이 부족하고, 대신 사용할 HP {hp_cost}도 부족해요.")
             attack = PendingCombatAttack(session.turn_index, target_index, weapon_index, spirit, 1,
-                                         stage="confirm", spell_costs=costs, spell_defense_value=defense)
+                                         stage="confirm", spell_costs=costs, spell_deferred_costs=deferred, spell_defense_value=defense)
             session.pending_attack = attack
-            if hp_cost:
-                session.briefing = f"마력이 {hp_cost} 부족해요. 대신 HP {hp_cost}을 소모해서 시전할까요?"
+            if hp_cost or costs.get("마력", 0):
+                session.briefing = spell_funding_prompt(session)
                 await session.message.edit(content=render_combat_session(session), view=CombatSpellCostView(session))
                 return
             await self.cast_spell()
@@ -3570,22 +3614,53 @@ class CombatView(CombatActionView):
             return
         costs = attack.spell_costs
         magic_cost = costs.get("마력", 0)
-        magic_used = min(caster.magic_points or 0, magic_cost)
-        hp_cost = magic_cost - magic_used
-        if hp_cost > caster.hp or costs.get("정신", 0) > (caster.spirit or 0):
-            session.pending_attack = None
-            await session.message.edit(content=render_combat_session(session, "주문 대가가 부족해 시전하지 않았어요."), view=CombatView(session))
+        if attack.spell_requested_donor is not None:
             return
+        for index, amount in attack.spell_donations.items():
+            donor = session.participants[index]
+            if index not in spell_mana_sources(session) or amount < 1 or amount > (donor.magic_points or 0):
+                session.briefing = "제공받을 마력을 다시 확인해 주세요. 아직 자원을 소모하지 않았어요."
+                await session.message.edit(content=render_combat_session(session), view=CombatSpellCostView(session))
+                return
+        corpse = session.participants[attack.spell_sacrifice] if attack.spell_sacrifice is not None else None
+        if corpse is not None and attack.spell_sacrifice not in spell_mana_sources(session, corpses=True):
+            attack.spell_sacrifice = None
+            session.briefing = "제물로 사용할 수 없는 대상이에요. 다시 선택해 주세요."
+            await session.message.edit(content=render_combat_session(session), view=CombatSpellCostView(session))
+            return
+        gifts = sum(attack.spell_donations.values())
+        pool = (caster.magic_points or 0) + ((corpse.magic_points or 0) if corpse is not None else 0)
+        magic_used = min(pool, max(0, magic_cost - gifts))
+        hp_cost = max(0, magic_cost - gifts - magic_used)
+        if hp_cost > caster.hp or costs.get("정신", 0) > (caster.spirit or 0):
+            session.briefing = "주문 대가가 부족해요. 마력을 요청하거나 제물을 선택해 주세요."
+            await session.message.edit(content=render_combat_session(session), view=CombatSpellCostView(session))
+            return
+        for resource, formula in attack.spell_deferred_costs.items():
+            costs[resource] = roll_damage_formula(formula)[0]
+        if costs.get("정신", 0) > (caster.spirit or 0):
+            session.briefing = "주문 대가로 사용할 정신이 부족해 시전하지 못했어요."
+            await session.message.edit(content=render_combat_session(session), view=CombatSpellCostView(session))
+            return
+        attack.spell_deferred_costs.clear()
         attack.spell_paid = True
         attack.stage = "rolling"
         spent = []
+        for index, amount in attack.spell_donations.items():
+            donor = session.participants[index]
+            donor.magic_points -= amount
+            spent.append(f"{donor.character_name} 마력 -{amount}")
+        if corpse is not None:
+            corpse.sacrificed = True
+            corpse.magic_points = 0
+            spent.append(f"제물 {corpse.character_name}")
         if "마력" in costs:
-            previous = caster.magic_points
-            caster.magic_points -= magic_used
+            previous = caster.magic_points or 0
+            caster.magic_points = pool - magic_used
             spent.append(f"마력 {previous} → {caster.magic_points}")
         if hp_cost:
             previous = caster.hp
-            caster.hp -= hp_cost  # Resource sacrifice is not an injury check.
+            caster.hp -= hp_cost
             spent.append(f"HP {previous} → {caster.hp}")
             record_combat_elimination(session, caster)
         if "이성" in costs:
@@ -4019,7 +4094,168 @@ class CombatTargetView(CombatActionView):
         self.add_item(CombatTargetSelect(session, weapon_index, shot_count, targets))
 
 
+class CombatManaSourceSelect(discord.ui.Select):
+    def __init__(self, session: CombatSession, targets: list[int], corpses: bool) -> None:
+        self.session, self.corpses = session, corpses
+        super().__init__(placeholder="제물 선택" if corpses else "마력을 요청할 동료 선택", options=[
+            discord.SelectOption(label=trim_choice_name(session.participants[i].character_name), value=str(i),
+                                 description=f"마력 {session.participants[i].magic_points}") for i in targets[:25]])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        async with session.lock:
+            if not await self.view.ensure_current(interaction):
+                return
+            attack = session.pending_attack
+            if attack is None or attack.stage != "confirm" or interaction.user.id != session.participants[attack.attacker_index].user_id:
+                await interaction.response.send_message("시전자만 선택할 수 있어요.", ephemeral=True)
+                return
+            index = int(self.values[0])
+            if index not in spell_mana_sources(session, corpses=self.corpses) or attack.spell_requested_donor is not None:
+                await interaction.response.send_message("대상을 다시 선택해 주세요.", ephemeral=True)
+                return
+            if self.corpses:
+                attack.spell_sacrifice = index
+                session.briefing = spell_funding_prompt(session)
+                await interaction.response.edit_message(content=render_combat_session(session), view=CombatSpellCostView(session))
+            else:
+                attack.spell_requested_donor = index
+                attack.spell_request_serial += 1
+                donor = session.participants[index]
+                caster = session.participants[attack.attacker_index]
+                session.briefing = f"{donor.character_name}, {caster.character_name}의 주문에 제공할 마력량을 정해 주세요."
+                await interaction.response.edit_message(content=render_combat_session(session), view=CombatManaOfferView(session))
+
+
+class CombatManaSourceView(CombatActionView):
+    def __init__(self, session: CombatSession, targets: list[int], corpses: bool) -> None:
+        super().__init__(session)
+        self.add_item(CombatManaSourceSelect(session, targets, corpses))
+        button = discord.ui.Button(label="돌아가기", style=discord.ButtonStyle.secondary, row=4)
+        async def back(interaction: discord.Interaction) -> None:
+            async with session.lock:
+                if not await self.ensure_current(interaction):
+                    return
+                attack = session.pending_attack
+                if attack is None or attack.stage != "confirm" or interaction.user.id != session.participants[attack.attacker_index].user_id:
+                    await interaction.response.send_message("시전자만 돌아갈 수 있어요.", ephemeral=True)
+                    return
+                session.briefing = spell_funding_prompt(session)
+                await interaction.response.edit_message(content=render_combat_session(session), view=CombatSpellCostView(session))
+        button.callback = back
+        self.add_item(button)
+
+
+class CombatManaAmountModal(discord.ui.Modal, title="제공할 마력"):
+    amount = discord.ui.TextInput(label="제공할 마력량", placeholder="숫자로 입력해 주세요", min_length=1, max_length=4)
+
+    def __init__(self, session: CombatSession) -> None:
+        super().__init__()
+        self.session = session
+        self.attack = session.pending_attack
+        self.request_serial = self.attack.spell_request_serial
+        self.donor_index = self.attack.spell_requested_donor
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        session = self.session
+        async with session.lock:
+            attack = session.pending_attack
+            if (combat_sessions.get(session.channel_id) is not session or session.phase != "combat"
+                    or attack is not self.attack or attack.stage != "confirm"
+                    or attack.spell_requested_donor != self.donor_index or attack.spell_request_serial != self.request_serial):
+                await interaction.response.send_message("이미 종료된 마력 요청이에요.", ephemeral=True)
+                return
+            donor = session.participants[self.donor_index]
+            if interaction.user.id != donor.user_id:
+                await interaction.response.send_message("요청받은 캐릭터만 제공량을 정할 수 있어요.", ephemeral=True)
+                return
+            others = sum(amount for i, amount in attack.spell_donations.items() if i != self.donor_index)
+            maximum = min(donor.magic_points or 0, max(0, attack.spell_costs.get("마력", 0) - others))
+            text = str(self.amount.value).strip()
+            if not text.isascii() or not text.isdecimal() or not 1 <= int(text) <= maximum or self.donor_index not in spell_mana_sources(session):
+                await interaction.response.send_message(f"1~{maximum} 사이의 마력을 입력해 주세요. 다시 마력 제공을 눌러 입력할 수 있어요.", ephemeral=True)
+                return
+            attack.spell_donations[self.donor_index] = int(text)
+            attack.spell_requested_donor = None
+            attack.spell_request_serial += 1
+            session.briefing = spell_funding_prompt(session)
+            await interaction.response.defer()
+            await session.message.edit(content=render_combat_session(session), view=CombatSpellCostView(session))
+
+
+class CombatManaOfferView(CombatActionView):
+    @discord.ui.button(label="마력 제공", style=discord.ButtonStyle.primary)
+    async def offer(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        async with self.session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            attack = self.session.pending_attack
+            if attack is None or attack.stage != "confirm" or attack.spell_requested_donor is None:
+                await interaction.response.send_message("이미 종료된 마력 요청이에요.", ephemeral=True)
+                return
+            if interaction.user.id != self.session.participants[attack.spell_requested_donor].user_id:
+                await interaction.response.send_message("요청받은 캐릭터만 제공량을 정할 수 있어요.", ephemeral=True)
+                return
+            await interaction.response.send_modal(CombatManaAmountModal(self.session))
+
+    @discord.ui.button(label="거절", style=discord.ButtonStyle.secondary)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.finish_request(interaction, False)
+
+    @discord.ui.button(label="요청 취소", style=discord.ButtonStyle.secondary)
+    async def cancel_request(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.finish_request(interaction, True)
+
+    async def finish_request(self, interaction: discord.Interaction, caster: bool) -> None:
+        async with self.session.lock:
+            if not await self.ensure_current(interaction):
+                return
+            attack = self.session.pending_attack
+            if attack is None or attack.stage != "confirm" or attack.spell_requested_donor is None:
+                await interaction.response.send_message("이미 종료된 마력 요청이에요.", ephemeral=True)
+                return
+            index = attack.attacker_index if caster else attack.spell_requested_donor
+            if interaction.user.id != self.session.participants[index].user_id:
+                await interaction.response.send_message("해당 캐릭터만 선택할 수 있어요.", ephemeral=True)
+                return
+            attack.spell_requested_donor = None
+            attack.spell_request_serial += 1
+            self.session.briefing = spell_funding_prompt(self.session)
+            await interaction.response.edit_message(content=render_combat_session(self.session), view=CombatSpellCostView(self.session))
+
+
 class CombatSpellCostView(CombatActionView):
+    def __init__(self, session: CombatSession) -> None:
+        super().__init__(session)
+        attack = session.pending_attack
+        if attack is None:
+            return
+        self.confirm.label = "HP를 소모하고 시전" if spell_funding_hp(session, attack) else "시전"
+        self.confirm.disabled = attack.spell_requested_donor is not None
+        self.confirm.style = discord.ButtonStyle.danger if spell_funding_hp(session, attack) else discord.ButtonStyle.primary
+        if attack.spell_costs.get("마력", 0):
+            for corpses, label in [(False, "마력 요청"), (True, "제물 사용")]:
+                button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=1,
+                                           disabled=attack.spell_requested_donor is not None or not spell_mana_sources(session, corpses=corpses))
+                async def choose(interaction: discord.Interaction, use_corpses: bool = corpses) -> None:
+                    async with session.lock:
+                        if not await self.ensure_current(interaction):
+                            return
+                        if interaction.user.id != session.participants[session.turn_index].user_id:
+                            await interaction.response.send_message("시전자만 선택할 수 있어요.", ephemeral=True)
+                            return
+                        if session.pending_attack.stage != "confirm" or session.pending_attack.spell_requested_donor is not None:
+                            await interaction.response.send_message("마력 요청을 먼저 마쳐 주세요.", ephemeral=True)
+                            return
+                        targets = spell_mana_sources(session, corpses=use_corpses)
+                        if not targets:
+                            await interaction.response.send_message("선택할 대상이 없어요.", ephemeral=True)
+                            return
+                        await interaction.response.edit_message(content=render_combat_session(session, "제물 선택" if use_corpses else "마력을 요청할 동료 선택"),
+                                                                view=CombatManaSourceView(session, targets, use_corpses))
+                button.callback = choose
+                self.add_item(button)
+
     @discord.ui.button(label="HP를 소모하고 시전", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         async with self.session.lock:

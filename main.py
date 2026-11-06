@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import kitchen_raid as kitchen
+
 import aiohttp
 import discord
 from discord import app_commands
@@ -1189,6 +1191,9 @@ class CombatParticipant:
     last_used_weapon: tuple[str, str] | None = None
     status_effects: list[CombatStatusEffect] = field(default_factory=list)
     enemy_id: str = ""
+    kitchen_owner: Any = None
+    kitchen_control: bool = False
+    kitchen_tears: bool = False
     damage_dealt: int = 0
     damage_received: int = 0
     armor: int = 0
@@ -1248,6 +1253,9 @@ class PendingCombatAttack:
     spell_defenses: dict[int, int] = field(default_factory=dict)
     spell_result: str = ""
     family_spell: str = ""
+    kitchen_checked: bool = False
+    kitchen_control: bool = False
+    kitchen_next_hit: int = 0
     spell_paid: bool = False
     spell_donations: dict[int, int] = field(default_factory=dict)
     spell_sacrifice: int | None = None
@@ -1297,6 +1305,7 @@ class CombatSession:
     dream_result: str = ""
     dream_events: list[DreamEvent] = field(default_factory=list)
     dream_difficulty: int = 1
+    kitchen_state: Any = None
     family_spawned: bool = False
     family_last_serial: int = -1
     family_ops: list[dict[str, Any]] = field(default_factory=list)
@@ -1330,6 +1339,8 @@ RAID_ENEMIES = {
                 "fight": 50, "dodge": 25, "gun": 0, "luck": 50},
     "dream": {"name": "꿈꾸는 고치", "dex": 40, "con": 100, "str": 100, "size": 200,
               "fight": 30, "dodge": 0, "gun": 0, "luck": 70, "pow": 120, "dream_attack": 80},
+    "kitchen": {"name": "성난 반죽", "dex": 45, "con": 60, "str": 40, "size": 50,
+                "fight": 60, "dodge": 15, "gun": 0, "luck": 50, "pow": 30},
     "hunter": {"name": "딜리아", "dex": 75, "con": 85, "str": 75, "size": 70,
                "fight": 90, "dodge": 75, "gun": 20, "luck": 76, "pow": 85},
     "mage": {"name": "디안", "dex": 50, "con": 35, "str": 45, "size": 50,
@@ -1517,6 +1528,9 @@ def make_raid_enemy(enemy_id: str) -> CombatParticipant:
 
 
 def randomize_raid_enemy(member: CombatParticipant, player_count: int) -> None:
+    if kitchen.is_enemy(member):
+        kitchen.configure_enemy(member, player_count)
+        return
     if member.enemy_id in {"hunter", "mage"}:
         member.enemy_skills = dict(RAID_ENEMIES[member.enemy_id])
         member.max_hp = 30 if member.enemy_id == "hunter" else 8
@@ -1583,6 +1597,8 @@ async def combat_skill_value(member: CombatParticipant, skill: str) -> int | Non
 
 
 async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) -> list[CombatWeapon]:
+    if kitchen.is_enemy(member):
+        return kitchen.weapons(member)
     if not member.enemy_id:
         return await registry.get_combat_weapons(member.character_value, refresh=refresh)
     if member.enemy_id == "hunter":
@@ -1639,6 +1655,8 @@ def combat_is_active(member: CombatParticipant) -> bool:
 
 def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatParticipant, *, ignore_armor: bool = False, weapon: CombatWeapon | None = None) -> tuple[int, str]:
     raw_damage = damage
+    if kitchen.enemy_kind(target) == "pot":
+        return 0, "냄비는 공격 대신 불을 줄여 주세요!"
     if target.enemy_id == "mage" and target.mana_barrier > 0 and not ignore_armor:
         shield_damage = max(0, damage) * (2 if source.enemy_id == "hunter" and weapon is not None and weapon.name == "정글도" else 1)
         previous = target.mana_barrier
@@ -1663,13 +1681,14 @@ def apply_combat_damage(target: CombatParticipant, damage: int, source: CombatPa
         target.major_wound = True
         reopened = " · 【상처 재발 · 중상】"
     previous_hp = target.hp
+    kitchen_note = kitchen.damage_note(target, damage, weapon) if target.kitchen_owner is not None else ""
     target.hp = max(1 if target.enemy_id == "dream" else 0, target.hp - damage)
     broken_armor = ""
     if target.armor_boosted and raw_damage >= 5 and not ignore_armor:
         target.armor_boosted = False
         target.armor = 1
         broken_armor = " · 【강화 장갑 파괴!】"
-    return damage, f"{armor_text}HP {previous_hp} → {target.hp}{' · 【전투불능】' if target.hp == 0 else ''}{broken_armor}{reopened}"
+    return damage, f"{armor_text}HP {previous_hp} → {target.hp}{' · 【전투불능】' if target.hp == 0 else ''}{broken_armor}{reopened}{kitchen_note}"
 
 
 def calculate_combat_max_hp(member: CombatParticipant) -> int:
@@ -1707,6 +1726,9 @@ def releasable_combat_statuses(session: CombatSession, member: CombatParticipant
 
 def roll_combat_d100(member: CombatParticipant, modifier: int = 0, *, session: CombatSession | None = None, context: str = "", weapon: CombatWeapon | None = None) -> tuple[int, list[int], int]:
     modifier -= int(member.major_wound)
+    if member.kitchen_tears:
+        modifier -= 1
+        member.kitchen_tears = False
     modifier -= int(maintaining_combat_shock(session, member))
     if session is not None and any(effect.spec.independent_hold and session.participants[effect.source_index] is member
                                    for target in session.participants if combat_is_present(target)
@@ -1886,7 +1908,7 @@ def separate_combat_boss_position(session: CombatSession) -> None:
         return
     allied_hunter = session.enemy_id == "hunter" and any(p.enemy_id == "mage" and combat_is_present(p) for p in session.participants)
     boss_positions = {member.position for member in session.participants
-                      if member.enemy_id and member.enemy_id != "minion" and combat_is_active(member)
+                      if member.enemy_id and member.enemy_id != "minion" and not kitchen.is_enemy(member) and combat_is_active(member)
                       and not (allied_hunter and member.enemy_id == "hunter")}
     for member in session.participants:
         if not member.enemy_id and combat_is_present(member) and member.position in boss_positions:
@@ -1936,7 +1958,7 @@ def combat_targets(session: CombatSession, weapon: CombatWeapon | None = None) -
                or (weapon is not None and weapon.area))
     close_only = weapon is not None and (is_melee_weapon(weapon) or (is_spell_weapon(weapon) and weapon.damage.strip() == "지배"))
     return [index for index, member in enumerate(session.participants)
-            if index != session.turn_index and combat_is_active(member)
+            if index != session.turn_index and combat_is_active(member) and kitchen.enemy_kind(member) != "pot"
             and (broaden or combat_opponents(session, session.turn_index, index))
             and (not betrayal or (not member.enemy_id and not current.enemy_id))
             and (not close_only or combat_distance(session, session.turn_index, index) == "근거리")]
@@ -1952,6 +1974,7 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         roster_members += [member for i, member in enumerate(session.participants) if i not in order]
         roster = "\n".join(
             (f"{member.field_symbol} {member.character_name}(누적 피해 {member.damage_received} · HP 없음)" if member.enemy_id == "dummy" else
+            f"{member.field_symbol} {member.character_name} · 공격 대신 불 조절" if kitchen.enemy_kind(member) == "pot" else
             f"{'▶ ' if member is session.participants[session.turn_index] else ''}{member.field_symbol} {member.character_name} · 민첩 {member.dexterity}\n"
             f"{combat_hp_bar(member)} HP {member.hp}/{member.max_hp}"
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
@@ -1996,6 +2019,8 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             enemy = ("\n상대: 연습용 허수아비 · HP·공격·회피·반격 없음\n모집자가 훈련 종료를 눌러 마칠 수 있어요."
                      if session.enemy_id == "dummy" else
                      "\n상대: 실험키메라 · 장갑 1 · 상태이상 면역\n시작 시 능력치·특수기 2개를 무작위로 정해요.\n10라운드부터 검은 안개 · 정신 판정 실패 시 피해")
+        if session.enemy_id == "kitchen":
+            enemy = "\n레레의 완벽한 식사 · 해물 크림 파스타 만들기\n조리 진행도 0% · 재료 상태 100점 · 공격·손질·불 조절로 협동해 주세요!"
         if session.enemy_id == "hunter":
             enemy = "\n상대: 루베랄드의 칼날과 광기 · 라운드 제한 없음\n3라운드 종료 후 디안 난입 · 두 명 모두 쓰러뜨리면 승리"
         if session.enemy_id == "dream":
@@ -2032,6 +2057,8 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
                 title = "두드리는 소리" if event.kind == "pulse" else "눈꺼풀 아래"
                 remaining = max(0, event.threshold - (dream_boss(session).damage_received - event.damage_start))
                 sections.append(f"【{title}】 다음 보스 차례 전 {remaining} 피해 더 주면 {'취소' if event.kind == 'pulse' else '약화'}")
+    if session.enemy_id == "kitchen" and session.kitchen_state is not None:
+        sections.append(kitchen.status(session))
     if session.enemy_id == "hunter":
         mage = next((p for p in session.participants if p.enemy_id == "mage"), None)
         sections.append("디안 등장 전 · 딜리아의 체력을 남겨두면 후반에 도움을 받아요." if mage is None else
@@ -2124,6 +2151,8 @@ def render_combat_ranking(session: CombatSession) -> str:
 
 
 def render_combat_winner(session: CombatSession) -> str:
+    if session.enemy_id == "kitchen":
+        return kitchen.ending(session)
     if session.enemy_id == "dream":
         return render_dream_ending(session)
     if session.annihilated:
@@ -2222,6 +2251,8 @@ async def resolve_combat_annihilation(session: CombatSession, caster: CombatPart
 
 
 async def finish_combat_if_decided(session: CombatSession) -> bool:
+    if session.enemy_id == "kitchen":
+        return await kitchen.finish_if_decided(session)
     if session.enemy_id == "dream":
         await maybe_hatch_dream(session)
         players = any(not member.enemy_id and combat_is_active(member) for member in session.participants)
@@ -2796,6 +2827,9 @@ async def repost_combat_turn(session: CombatSession) -> None:
             if current.enemy_id:
                 current.actions_left = 1
             break
+        if kitchen.is_enemy(current):
+            await kitchen.take_turn(session)
+            return
         if current.enemy_id in {"hunter", "mage"}:
             await publish_combat_panel(session, None)
             await take_family_turn(session)
@@ -3531,6 +3565,8 @@ class CombatLobbyView(discord.ui.View):
                 session.round_number = 1
                 session.turn_index = 0
                 session.turn_serial = 1
+                if session.enemy_id == "kitchen":
+                    kitchen.initialize(session, difficulty_count)
                 for member in session.participants:
                     if not member.enemy_id and member.sanity == 0:
                         lose_combat_sanity(session, member, 0)
@@ -3539,7 +3575,7 @@ class CombatLobbyView(discord.ui.View):
                 if session.enemy_id == "dream":
                     session.dream_difficulty = difficulty_count
                     append_combat_log(session, "고치에서 뻗은 실이 당신들의 꿈을 붙잡고 있습니다.")
-                session.briefing = f"전투 시작! {session.participants[0].character_name}의 턴이에요!"
+                session.briefing = f"전투 시작! {session.participants[session.turn_index].character_name}의 턴이에요!"
                 if await process_chimera_encounter_sanity(session):
                     return
                 await repost_combat_turn(session)
@@ -3871,7 +3907,7 @@ class CombatView(CombatActionView):
                 retry.callback = self.retry_status_checks
                 self.add_item(retry)
             else:
-                self.add_item(CombatStatusEscapeSelect(session))
+                self.add_item(kitchen.escape_control(session) if session.enemy_id == "kitchen" else CombatStatusEscapeSelect(session))
             return
         if current.dream_betrayal:
             for item in self.children:
@@ -3912,6 +3948,8 @@ class CombatView(CombatActionView):
         )
         cover_button.callback = self.take_cover
         self.add_item(cover_button)
+        if session.enemy_id == "kitchen" and session.kitchen_state is not None and not current.enemy_id:
+            self.add_item(kitchen.KitchenActions(session))
         if session.enemy_id == "dream" and (dream_help_targets(session) or current.dream_star):
             self.add_item(DreamUtilitySelect(session))
         if current.madness == "도주":
@@ -4558,6 +4596,7 @@ class CombatView(CombatActionView):
             caster.spirit -= costs["정신"]
             spent.append(f"정신 {previous} → {caster.spirit}")
         lock_compulsive_weapon(caster, weapon)
+        await kitchen.check_control(session, attack)
         if weapon.damage.strip() == "멸망":
             session.last_attack = f"{caster.character_name} · {weapon.name}"
             session.last_attack_events = ["대가: " + (" · ".join(spent) or "없음")]
@@ -4607,6 +4646,7 @@ class CombatView(CombatActionView):
         current = session.participants[attack.attacker_index]
         target = session.participants[attack.target_index]
         weapon = current.weapons[attack.weapon_index]
+        await kitchen.check_control(session, attack)
         for shot_number in range(1, attack.shot_count + 1):
             burst_penalty = shot_number - 1 if is_projectile_weapon(weapon) else 0
             distance = combat_distance(session, attack.attacker_index, attack.target_index)
@@ -4726,18 +4766,30 @@ class CombatView(CombatActionView):
         session.briefing = f"{target.character_name}의 피해를 계산하고 있어요."
         avoided_hit_indexes = avoided_hit_indexes or set()
         for hit_index, (_roll, result, shot_number) in enumerate(attack.hits):
+            if hit_index < attack.kitchen_next_hit:
+                continue
             if hit_index in avoided_hit_indexes:
                 shot_text = f" · {shot_number}발째" if is_projectile_weapon(weapon) else ""
                 append_combat_log(session, f"【회피 성공!】 {target.character_name}{shot_text} · 피해 없음")
                 session.last_attack_events.append(f"{target.character_name}의 회피 성공{shot_text}! 피해 없음.")
+                attack.kitchen_next_hit = hit_index + 1
                 session.recent_logs = session.recent_logs[-COMBAT_RECENT_LOG_LIMIT:]
                 continue
-            damage, detail = roll_weapon_damage(
-                weapon, attacker.strength, attacker.size,
-                critical=weapon.impaling and result in {"극단적 성공", "대성공"},
-            )
+            choice = session.kitchen_state.damage_choice if session.kitchen_state is not None else None
+            if choice is not None and choice.attack is attack and choice.index == hit_index:
+                damage, detail = choice.raw, choice.detail
+            else:
+                damage, detail = roll_weapon_damage(
+                    weapon, attacker.strength, attacker.size,
+                    critical=weapon.impaling and result in {"극단적 성공", "대성공"},
+                )
+            limited = await kitchen.limit_damage(session, attack, hit_index, damage, detail, avoided_hit_indexes)
+            if limited is None:
+                return
+            damage, detail = limited
             barrier_protected = target.enemy_id == "mage" and target.mana_barrier > 0
             damage, health_text = apply_combat_damage(target, damage, attacker, weapon=weapon)
+            attack.kitchen_next_hit = hit_index + 1
             append_combat_log(session,
                 f"피해 {detail}\n"
                 f"【{damage} 피해】 {target.character_name} · {health_text}"
@@ -4760,6 +4812,8 @@ class CombatView(CombatActionView):
     async def complete_attack_turn(self, summary: str = "공격이 끝났어요.") -> None:
         session = self.session
         attack = session.pending_attack
+        if session.kitchen_state is not None and session.kitchen_state.damage_choice is not None:
+            return
         resume = attack.resume_turn_index if attack is not None else None
         session.pending_attack = None
         if resume is not None:
@@ -5234,7 +5288,7 @@ async def continue_combat_area_spell(session: CombatSession, previous: PendingCo
         return False
     target_index, *rest = remaining
     attack = replace(previous, target_index=target_index, remaining_targets=rest, stage="defense",
-                     spell_defense_value=previous.spell_defenses.get(target_index, 0), hits=list(previous.hits))
+                     spell_defense_value=previous.spell_defenses.get(target_index, 0), hits=list(previous.hits), kitchen_next_hit=0)
     session.pending_attack = attack
     defender = session.participants[target_index]
     weapon = session.participants[attack.attacker_index].weapons[attack.weapon_index]
@@ -5960,7 +6014,8 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
 @app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy"),
                            app_commands.Choice(name="실험키메라", value="chimera"),
                            app_commands.Choice(name="꿈꾸는 고치", value="dream"),
-                           app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter")])
+                           app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter"),
+                           app_commands.Choice(name="레레의 완벽한 식사", value="kitchen")])
 @app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.")
 async def combat_command(
     interaction: discord.Interaction,
@@ -6322,6 +6377,8 @@ async def main() -> None:
     finally:
         await registry.close()
 
+
+kitchen.bind(globals())
 
 if __name__ == "__main__":
     asyncio.run(main())

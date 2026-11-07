@@ -619,7 +619,13 @@ async def use_action(session: Any, interaction: discord.Interaction, value: str,
             damage, health = m.apply_combat_damage(target, min(raw, target.hp), actor)
             await event(session, f"손질 {detail}\n【안전한 손질 · {damage}】 {target.character_name} · {health} · {quality_text}")
         elif value.startswith("prep:"):
-            await event(session, f"【손질 실패 · {result}】 {actor.character_name} · {quality_text}")
+            if result == "대실패":
+                raw, detail = m.roll_damage_formula("1d3")
+                damage, health = m.apply_combat_damage(actor, raw, target)
+                await event(session, f"{detail}\n【손질 대실패 · {damage} 피해】 {actor.character_name} · {health} · {quality_text}")
+                await m.check_combat_major_wound(session, actor, damage)
+            else:
+                await event(session, f"【손질 실패 · {result}】 {actor.character_name} · {quality_text}")
         else:
             raw, detail = m.roll_damage_formula("1d3")
             damage, health = m.apply_combat_damage(actor, raw, target)

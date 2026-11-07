@@ -234,7 +234,7 @@ class KitchenRaidTests(unittest.TestCase):
                     with patch.object(m.registry, "get_skill_value", AsyncMock(return_value=65)), patch.object(m, "roll_combat_d100", return_value=(roll, [roll], 0)), patch.object(m, "roll_damage_formula", return_value=(1, "1d3 [1]")), patch.object(m, "repost_combat_turn", AsyncMock()), patch.object(m, "refresh_combat_turn_weapons", AsyncMock()):
                         await k.use_action(s, interaction(s), action, serial)
                     self.assertEqual(state.quality, 50+delta, (action, roll))
-                    self.assertEqual(s.participants[0].hp, 79 if roll in {80, 100} and action.startswith("cool:") else 80)
+                    self.assertEqual(s.participants[0].hp, 79 if (roll in {80, 100} and action.startswith("cool:")) or (roll == 100 and action.startswith("prep:")) else 80)
                     self.assertTrue(any(f"50 → {50+delta} ({delta:+d})" in str(line) for line in s.recent_logs))
                     previous = state.quality
                     await k.use_action(s, interaction(s), action, serial)

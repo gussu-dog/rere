@@ -345,7 +345,6 @@ class SheetRegistry:
                     print(f"Google spreadsheet load failed ({label}, {spreadsheet_id}): {detail}")
                 else:
                     loaded.append(result)
-                    print(f"Google spreadsheet loaded ({label}, {spreadsheet_id}): {len(result.tabs)} tabs")
             if not loaded:
                 details = " / ".join(failures)
                 raise SheetError(f"등록된 Google 시트를 하나도 읽지 못했어요. API 키와 시트 공유 설정을 확인해 주세요. {details}")
@@ -1050,7 +1049,6 @@ async def send_flat_response(
         channel,
         (discord.TextChannel, discord.ForumChannel, discord.VoiceChannel, discord.StageChannel),
     ):
-        print(f"Flat webhook skipped for unsupported channel ({type(channel).__name__}).")
         return False
 
     deferred = False
@@ -1075,13 +1073,7 @@ async def send_flat_response(
             retry_below = not message.components
     except Exception as exc:
         flat_webhooks.pop(channel.id, None)
-        app_manage_webhooks = getattr(interaction.app_permissions, "manage_webhooks", None)
-        status = getattr(exc, "status", None)
-        code = getattr(exc, "code", None)
-        print(
-            f"Flat webhook response failed ({type(exc).__name__}; HTTP {status}; code {code}; "
-            f"app_manage_webhooks={app_manage_webhooks}; channel={channel.id})."
-        )
+        print(f"Flat webhook response failed ({type(exc).__name__}).")
         try:
             if deferred:
                 await interaction.edit_original_response(content=content, view=view)
@@ -1136,7 +1128,6 @@ async def registration_character_autocomplete(interaction: discord.Interaction, 
     # on some discord.py versions, and the Python parameter name on others.
     sheet_id = getattr(interaction.namespace, "sheet", None) or getattr(interaction.namespace, "시트", None)
     if not sheet_id:
-        print("Character tab autocomplete skipped: selected sheet was missing from the interaction options.")
         return []
     try:
         choices = await registry.get_character_tab_choices(sheet_id)

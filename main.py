@@ -1223,6 +1223,7 @@ class CombatParticipant:
     field_symbol: str = ""
     paralysis_stacks: int = 0
     paralysis_skip_end_serial: int = -1
+    team: str = ""
 
     @property
     def build(self) -> int:
@@ -1488,8 +1489,8 @@ async def redirect_madness_attack(session: CombatSession, weapon: CombatWeapon, 
     chosen = target
     if not succeeded:
         friends = [index for index, member in enumerate(session.participants)
-                   if index != session.turn_index and not member.enemy_id and combat_is_active(member)
-                   and session.mode == "레이드" and (not is_melee_weapon(weapon)
+                   if combat_allies(session, session.turn_index, index) and combat_is_active(member)
+                   and (not is_melee_weapon(weapon)
                        or combat_distance(session, session.turn_index, index) == "근거리")]
         chosen = random.choice(friends) if friends else session.turn_index
     append_combat_log(session, f"행운 {combat_roll_text(current, roll, rolls, modifier, session=session)} / {luck}\n"
@@ -1632,7 +1633,21 @@ async def combat_weapons(member: CombatParticipant, *, refresh: bool = False) ->
     return []
 
 
+COMBAT_TEAMS = ("A팀", "B팀")
+
+
+def combat_allies(session: CombatSession, first: int, second: int) -> bool:
+    a, b = session.participants[first], session.participants[second]
+    if first == second or b.enemy_id:
+        return False
+    if session.mode == "레이드":
+        return True
+    return session.mode == "팀전" and not a.enemy_id and a.team in COMBAT_TEAMS and a.team == b.team
+
+
 def combat_opponents(session: CombatSession, first: int, second: int) -> bool:
+    if session.mode == "팀전":
+        return first != second and not combat_allies(session, first, second)
     if session.enemy_id == "hunter" and first != second:
         a, b = session.participants[first], session.participants[second]
         if a.enemy_id == "mage" or b.enemy_id == "mage":
@@ -1792,8 +1807,8 @@ def spell_mana_sources(session: CombatSession, *, corpses: bool = False) -> list
         return [i for i, member in enumerate(session.participants) if not member.enemy_id
                 and member is not caster and (member.hp <= 0 or member.permanently_insane) and not member.forfeited and not member.sacrificed
                 and (member.magic_points or 0) > 0]
-    return [i for i, member in enumerate(session.participants) if not member.enemy_id
-            and member is not caster and session.mode == "레이드" and combat_is_active(member)
+    return [i for i, member in enumerate(session.participants)
+            if combat_allies(session, session.turn_index, i) and combat_is_active(member)
             and (member.magic_points or 0) > 0]
 
 
@@ -1923,7 +1938,10 @@ def initialize_combat_field(session: CombatSession) -> None:
             member.field_symbol = "◎" if member.enemy_id != "minion" else "ⓐ"
         else:
             member.field_symbol = chr(ord("①") + player_number)
-            member.position = 0 if session.mode == "레이드" else player_number % 2
+            if session.mode == "팀전":
+                member.position = COMBAT_TEAMS.index(member.team)
+            else:
+                member.position = 0 if session.mode == "레이드" else player_number % 2
             player_number += 1
 
 
@@ -1975,7 +1993,8 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
         roster = "\n".join(
             (f"{member.field_symbol} {member.character_name}(누적 피해 {member.damage_received} · HP 없음)" if member.enemy_id == "dummy" else
             f"{member.field_symbol} {member.character_name} · {'불 줄이기 필요' if session.kitchen_state.pot_warning else '약불로 조리 중'}" if kitchen.enemy_kind(member) == "pot" else
-            f"{'▶ ' if member is session.participants[session.turn_index] else ''}{member.field_symbol} {member.character_name} · 민첩 {member.dexterity}\n"
+            f"{'▶ ' if member is session.participants[session.turn_index] else ''}{member.field_symbol} {member.character_name}"
+            f"{' · ' + member.team if session.mode == '팀전' else ''} · 민첩 {member.dexterity}\n"
             f"{combat_hp_bar(member)} HP {member.hp}/{member.max_hp}"
             f"{' · 장갑 ' + str(member.armor) if member.armor else ''}"
             f"{' · 마력장벽 ' + str(member.mana_barrier) if member.enemy_id == 'mage' else ''}"
@@ -2006,6 +2025,13 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             f"{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 기절' if member.unconscious else ' · 손질 완료' if kitchen.is_enemy(member) and member.hp <= 0 else ' · 전투불능' if member.hp <= 0 else ''}")
             for member in roster_members
         )
+    elif session.mode == "팀전":
+        teams = []
+        for team in COMBAT_TEAMS:
+            members = [p for p in session.participants if p.team == team]
+            names = "\n".join(f"{p.character_value.partition('|')[0].strip()} | {p.character_name}" for p in members)
+            teams.append(f"{team} ({len(members)}명)\n{names or '참가자 없음'}")
+        roster = "\n\n".join(teams)
     else:
         roster = "\n".join(
             f"{index}. {member.character_value.partition('|')[0].strip()} | {member.character_name}"
@@ -2025,7 +2051,8 @@ def render_combat_session(session: CombatSession, prompt: str | None = None) -> 
             enemy = "\n상대: 루베랄드의 칼날과 광기 · 라운드 제한 없음\n3라운드 종료 후 디안 난입 · 두 명 모두 쓰러뜨리면 승리"
         if session.enemy_id == "dream":
             enemy = "\n상대: 꿈꾸는 고치 · 2인 이상 · 상태이상 면역\n고치 3라운드 후 부화 · 총 12라운드 생존\n요정 장난 30% 추가 등장"
-        body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n참여 버튼을 눌러 캐릭터를 선택해 주세요."
+        guide = "A팀 또는 B팀 참여 버튼을 눌러 캐릭터를 선택해 주세요." if session.mode == "팀전" else "참여 버튼을 눌러 캐릭터를 선택해 주세요."
+        body = f"모의전투 모집 중 · {session.mode}\n참가자 {players}/8{enemy}\n{roster}\n\n{guide}"
         return f"```text\n{body}\n```"
 
     current = session.participants[session.turn_index]
@@ -2124,6 +2151,13 @@ def record_combat_elimination(session: CombatSession, member: CombatParticipant)
 
 
 def render_combat_ranking(session: CombatSession) -> str:
+    if session.mode == "팀전":
+        lines = []
+        for team in COMBAT_TEAMS:
+            survivors = [p for p in session.participants if p.team == team and combat_is_active(p)]
+            names = ", ".join(f"{p.character_name} (HP {p.hp}/{p.max_hp})" for p in survivors)
+            lines.append(f"{team} · {names or '행동 가능한 캐릭터 없음'}")
+        return "팀별 결과\n" + "\n".join(lines)
     if session.mode == "레이드":
         lines = [f"{member.character_name} · 입힌 피해 {member.damage_dealt} · HP {member.hp}{' · 기권' if member.forfeited else ' · 제물' if member.sacrificed else ' · 영구 광기 · 탈락' if member.permanently_insane else ' · 기절' if member.unconscious else ''}"
                  for member in session.participants if not member.enemy_id]
@@ -2158,7 +2192,10 @@ def render_combat_winner(session: CombatSession) -> str:
     if session.annihilated:
         return render_combat_annihilation(session)
     survivors = [member for member in session.participants if combat_is_active(member)]
-    if (len(session.participants) > 1 and len({member.hp for member in session.participants}) == 1
+    if session.mode == "팀전":
+        teams = {member.team for member in survivors}
+        outcome = f"{next(iter(teams))} 승리!" if len(teams) == 1 else "무승부 · 양 팀 모두 전투 불능"
+    elif (len(session.participants) > 1 and len({member.hp for member in session.participants}) == 1
             and (not survivors or len(survivors) == len(session.participants))):
         names = ", ".join(member.character_name for member in session.participants)
         outcome = f"{names} 무승부 · HP {session.participants[0].hp}"
@@ -2274,6 +2311,9 @@ async def finish_combat_if_decided(session: CombatSession) -> bool:
     elif session.mode == "레이드":
         boss_type = "chimera" if session.enemy_id == "chimera" else "dummy"
         if any(not member.enemy_id for member in survivors) and any(member.enemy_id == boss_type for member in survivors):
+            return False
+    elif session.mode == "팀전":
+        if len({member.team for member in survivors}) > 1:
             return False
     elif len(survivors) > 1:
         return False
@@ -3417,9 +3457,22 @@ class CombatLobbyView(discord.ui.View):
     def __init__(self, session: CombatSession) -> None:
         super().__init__(timeout=None)
         self.session = session
+        if session.mode == "팀전":
+            self.remove_item(self.join_button)
+            for team in COMBAT_TEAMS:
+                button = discord.ui.Button(label=f"{team} 참여", style=discord.ButtonStyle.primary, row=0)
+
+                async def join_team(interaction: discord.Interaction, selected_team: str = team) -> None:
+                    await self.open_join_picker(interaction, selected_team)
+
+                button.callback = join_team
+                self.add_item(button)
 
     @discord.ui.button(label="참여", style=discord.ButtonStyle.primary)
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.open_join_picker(interaction)
+
+    async def open_join_picker(self, interaction: discord.Interaction, team: str = "") -> None:
         session = self.session
         if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
             await interaction.response.send_message("이 모집은 이미 종료됐어요.", ephemeral=True)
@@ -3436,8 +3489,8 @@ class CombatLobbyView(discord.ui.View):
                 await interaction.followup.send("참가할 캐릭터가 없어요. `/캐릭터등록`을 먼저 해 주세요. 이미 참가한 캐릭터는 목록에서 제외돼요.", ephemeral=True)
                 return
             await interaction.followup.send(
-                "참가할 캐릭터를 선택해 주세요.",
-                view=CombatJoinView(session, interaction.user.id, choices), ephemeral=True,
+                f"{team}에 참가할 캐릭터를 선택해 주세요." if team else "참가할 캐릭터를 선택해 주세요.",
+                view=CombatJoinView(session, interaction.user.id, choices, team=team), ephemeral=True,
             )
         except Exception as exc:
             print(f"Combat join choices failed ({type(exc).__name__}).")
@@ -3454,6 +3507,9 @@ class CombatLobbyView(discord.ui.View):
             async with session.lock:
                 if combat_sessions.get(session.channel_id) is not session or session.phase != "lobby":
                     await interaction.followup.send("이 모집은 이미 종료됐어요.", ephemeral=True)
+                    return
+                if session.mode == "팀전" and {member.team for member in session.participants} != set(COMBAT_TEAMS):
+                    await interaction.followup.send("A팀과 B팀에 각각 캐릭터가 한 명 이상 필요해요.", ephemeral=True)
                     return
                 player_count = sum(not member.enemy_id for member in session.participants)
                 minimum = 2 if session.enemy_id == "dream" else 1 if session.mode == "레이드" else 2
@@ -3617,7 +3673,7 @@ class CombatJoinSelect(discord.ui.Select):
             index = int(self.values[0])
             if not view.page * 25 <= index < min((view.page + 1) * 25, len(view.choices)):
                 raise ValueError("Invalid character choice")
-            joined = await join_combat(interaction, view.choices[index][0], expected_session=view.session)
+            joined = await join_combat(interaction, view.choices[index][0], expected_session=view.session, team=view.team)
             if joined:
                 view.stop()
         except (ValueError, IndexError):
@@ -3628,12 +3684,13 @@ class CombatJoinSelect(discord.ui.Select):
 
 
 class CombatJoinView(discord.ui.View):
-    def __init__(self, session: CombatSession, user_id: int, choices: list[tuple[str, str]], page: int = 0) -> None:
+    def __init__(self, session: CombatSession, user_id: int, choices: list[tuple[str, str]], page: int = 0, *, team: str = "") -> None:
         super().__init__(timeout=300)
         self.session = session
         self.user_id = user_id
         self.choices = choices
         self.page = page
+        self.team = team
         self.add_item(CombatJoinSelect(choices, page))
         for direction, label in ((-1, "이전"), (1, "다음")):
             if 0 <= page + direction < (len(choices) + 24) // 25:
@@ -3644,7 +3701,7 @@ class CombatJoinView(discord.ui.View):
                     next_page = self.page + step
                     await interaction.response.edit_message(
                         content=f"참가할 캐릭터를 선택해 주세요. ({next_page + 1}/{(len(choices) + 24) // 25})",
-                        view=CombatJoinView(session, user_id, choices, next_page),
+                        view=CombatJoinView(session, user_id, choices, next_page, team=team),
                     )
                     self.stop()
                 button.callback = change_page
@@ -3766,7 +3823,7 @@ def combat_first_aid_targets(session: CombatSession) -> list[int]:
             and (member is current or member.madness != "편집증")
             and (member.hp < member.max_hp or member.major_wound or member.paralyzed or member.unconscious
                  or any("지속" in effect.spec.kinds for effect in active_combat_statuses(session, member)))
-            and (member is current or (session.mode == "레이드"
+            and (member is current or (combat_allies(session, session.turn_index, index)
                  and combat_distance(session, session.turn_index, index) == "근거리"))]
 
 
@@ -5960,10 +6017,13 @@ async def start_combat(interaction: discord.Interaction, mode: str = "개인전"
     return True
 
 
-async def join_combat(interaction: discord.Interaction, character: str, *, expected_session: CombatSession | None = None) -> bool:
+async def join_combat(interaction: discord.Interaction, character: str, *, expected_session: CombatSession | None = None, team: str = "") -> bool:
     session = combat_sessions.get(interaction.channel_id)
     if session is None or session.phase != "lobby" or (expected_session is not None and session is not expected_session):
         await send_response(interaction, "이 모집은 이미 종료됐어요. 새 모집창의 참여 버튼을 눌러 주세요!", ephemeral=True)
+        return False
+    if session.mode == "팀전" and team not in COMBAT_TEAMS:
+        await send_response(interaction, "모집창에서 A팀 또는 B팀 참여를 눌러 주세요.", ephemeral=True)
         return False
     # A component update edits the private picker through its interaction token.
     # Message.edit uses the bot endpoint, which cannot edit ephemeral messages.
@@ -5994,6 +6054,7 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
             selected,
             display_name,
             is_pulp=resolved[0] == SORTED_TABLE_SPREADSHEET_ID,
+            team=team if session.mode == "팀전" else "",
         ))
         if session.message is not None:
             try:
@@ -6038,15 +6099,19 @@ class CombatRaidPicker(discord.ui.View):
         self.add_item(CombatRaidSelect())
 
 
-@bot.tree.command(name="모의전투", description="개인전·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.")
+@bot.tree.command(name="모의전투", description="개인전·팀전·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.")
 @app_commands.guild_only()
 @app_commands.rename(mode="종류")
 @app_commands.choices(mode=[app_commands.Choice(name="개인전", value="duel"),
+                            app_commands.Choice(name="팀전", value="team"),
                             app_commands.Choice(name="레이드", value="raid")])
-@app_commands.describe(mode="개인전 또는 레이드를 선택해 주세요.")
+@app_commands.describe(mode="개인전, 팀전 또는 레이드를 선택해 주세요.")
 async def combat_command(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
     if mode.value == "duel":
         await start_combat(interaction, "개인전")
+        return
+    if mode.value == "team":
+        await start_combat(interaction, "팀전")
         return
     if interaction.channel_id in combat_sessions:
         await send_response(interaction, "이 채널에는 이미 진행 중인 모의전투가 있어요.", ephemeral=True)

@@ -6001,13 +6001,10 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
             except (discord.HTTPException, OSError) as exc:
                 print(f"Combat lobby roster refresh failed after join ({type(exc).__name__}).")
     try:
-        await interaction.edit_original_response(
-            content=f"**{display_name}** 캐릭터가 모의전투에 참가했어요! 다른 캐릭터는 모집창의 참여 버튼으로 추가해 주세요.",
-            view=None,
-        )
+        await interaction.delete_original_response()
     except (discord.HTTPException, OSError) as exc:
         # Registration has succeeded. A UI cleanup error must not report failure.
-        print(f"Combat join confirmation update failed ({type(exc).__name__}).")
+        print(f"Combat join picker cleanup failed ({type(exc).__name__}).")
     return True
 
 

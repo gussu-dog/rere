@@ -6294,7 +6294,7 @@ async def pick_choice(interaction: discord.Interaction, choices: list[str]) -> N
 
 class ChoiceRetryView(discord.ui.View):
     def __init__(self, user_id: int, choices: list[str]) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=None)
         self.user_id = user_id
         self.choices = choices
 

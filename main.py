@@ -6029,7 +6029,7 @@ class CombatRaidSelect(discord.ui.Select):
         if await start_combat(interaction, "레이드", self.values[0]):
             view.stop()
             try:
-                await view.command_interaction.edit_original_response(content="레이드 모집창을 열었어요!", view=None)
+                await view.command_interaction.delete_original_response()
             except discord.HTTPException as exc:
                 print(f"레이드 선택 메뉴 닫기 실패: {exc}")
 

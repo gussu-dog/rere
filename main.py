@@ -1291,7 +1291,7 @@ class CombatSession:
     last_attack_events: list[str] = field(default_factory=list)
     elimination_order: list[int] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    mode: str = "대련"
+    mode: str = "개인전"
     enemy_id: str = ""
     turn_order: list[int] = field(default_factory=list)
     fog_start_round: int = 0
@@ -5940,7 +5940,7 @@ class FamilySpellView(CombatActionView):
 
 
 
-async def start_combat(interaction: discord.Interaction, mode: str = "대련", enemy_id: str = "") -> None:
+async def start_combat(interaction: discord.Interaction, mode: str = "개인전", enemy_id: str = "") -> None:
     channel_id = interaction.channel_id
     if channel_id in combat_sessions:
         await send_response(interaction, "이 채널에는 이미 진행 중인 모의전투가 있어요.", ephemeral=True)
@@ -6010,20 +6010,24 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
     return True
 
 
-@bot.tree.command(name="모의전투", description="대련·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.")
+@bot.tree.command(name="모의전투", description="개인전·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.")
 @app_commands.guild_only()
-@app_commands.rename(raid="레이드")
-@app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy"),
-                           app_commands.Choice(name="실험키메라", value="chimera"),
-                           app_commands.Choice(name="꿈꾸는 고치", value="dream"),
-                           app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter"),
-                           app_commands.Choice(name="레레의 완벽한 식사", value="kitchen")])
-@app_commands.describe(raid="모집할 레이드의 상대예요. 비워 두면 캐릭터끼리 대련해요.")
+@app_commands.rename(battle="종류")
+@app_commands.choices(battle=[app_commands.Choice(name="개인전", value="duel"),
+                             app_commands.Choice(name="연습용 허수아비", value="dummy"),
+                             app_commands.Choice(name="실험키메라", value="chimera"),
+                             app_commands.Choice(name="꿈꾸는 고치", value="dream"),
+                             app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter"),
+                             app_commands.Choice(name="레레의 완벽한 식사", value="kitchen")])
+@app_commands.describe(battle="개인전 또는 모집할 레이드를 선택해 주세요.")
 async def combat_command(
     interaction: discord.Interaction,
-    raid: app_commands.Choice[str] | None = None,
+    battle: app_commands.Choice[str],
 ) -> None:
-    await start_combat(interaction, "레이드" if raid else "대련", raid.value if raid else "")
+    if battle.value == "duel":
+        await start_combat(interaction, "개인전")
+    else:
+        await start_combat(interaction, "레이드", battle.value)
 
 
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")

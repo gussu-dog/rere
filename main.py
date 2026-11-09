@@ -6010,24 +6010,31 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
     return True
 
 
-@bot.tree.command(name="모의전투", description="개인전·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.")
-@app_commands.guild_only()
-@app_commands.rename(battle="종류")
-@app_commands.choices(battle=[app_commands.Choice(name="개인전", value="duel"),
-                             app_commands.Choice(name="연습용 허수아비", value="dummy"),
-                             app_commands.Choice(name="실험키메라", value="chimera"),
-                             app_commands.Choice(name="꿈꾸는 고치", value="dream"),
-                             app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter"),
-                             app_commands.Choice(name="레레의 완벽한 식사", value="kitchen")])
-@app_commands.describe(battle="개인전 또는 모집할 레이드를 선택해 주세요.")
-async def combat_command(
-    interaction: discord.Interaction,
-    battle: app_commands.Choice[str],
-) -> None:
-    if battle.value == "duel":
-        await start_combat(interaction, "개인전")
-    else:
-        await start_combat(interaction, "레이드", battle.value)
+combat_group = app_commands.Group(
+    name="모의전투",
+    description="개인전·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.",
+    guild_only=True,
+)
+
+
+@combat_group.command(name="개인전", description="캐릭터끼리 싸우는 개인전을 모집해요.")
+async def combat_duel_command(interaction: discord.Interaction) -> None:
+    await start_combat(interaction, "개인전")
+
+
+@combat_group.command(name="레이드", description="레이드를 선택해서 참가자를 모집해요.")
+@app_commands.rename(raid="종류")
+@app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy"),
+                           app_commands.Choice(name="실험키메라", value="chimera"),
+                           app_commands.Choice(name="꿈꾸는 고치", value="dream"),
+                           app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter"),
+                           app_commands.Choice(name="레레의 완벽한 식사", value="kitchen")])
+@app_commands.describe(raid="모집할 레이드를 선택해 주세요.")
+async def combat_raid_command(interaction: discord.Interaction, raid: app_commands.Choice[str]) -> None:
+    await start_combat(interaction, "레이드", raid.value)
+
+
+bot.tree.add_command(combat_group)
 
 
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")

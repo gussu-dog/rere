@@ -1001,11 +1001,14 @@ flat_webhooks: dict[int, discord.Webhook] = {}
 flat_webhook_locks: dict[int, asyncio.Lock] = {}
 
 
-async def send_response(interaction: discord.Interaction, content: str, *, ephemeral: bool = False) -> None:
+async def send_response(
+    interaction: discord.Interaction, content: str, *, ephemeral: bool = False, view: discord.ui.View | None = None,
+) -> None:
+    options = {"view": view} if view is not None else {}
     if interaction.response.is_done():
-        await interaction.followup.send(content, ephemeral=ephemeral)
+        await interaction.followup.send(content, ephemeral=ephemeral, **options)
     else:
-        await interaction.response.send_message(content, ephemeral=ephemeral)
+        await interaction.response.send_message(content, ephemeral=ephemeral, **options)
 
 
 async def get_flat_webhook(
@@ -1035,7 +1038,9 @@ async def get_flat_webhook(
         return webhook
 
 
-async def send_flat_response(interaction: discord.Interaction, content: str) -> bool:
+async def send_flat_response(
+    interaction: discord.Interaction, content: str, *, view: discord.ui.View | None = None,
+) -> bool:
     channel = interaction.channel
     thread: discord.Thread | None = None
     if isinstance(channel, discord.Thread):
@@ -1048,15 +1053,26 @@ async def send_flat_response(interaction: discord.Interaction, content: str) -> 
         print(f"Flat webhook skipped for unsupported channel ({type(channel).__name__}).")
         return False
 
-    sent = False
+    deferred = False
+    retry_below = False
     try:
-        await interaction.response.defer(thinking=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(thinking=True)
+            deferred = True
         webhook = await get_flat_webhook(channel)
         send_options: dict[str, Any] = {"username": FLAT_DISPLAY_NAME, "wait": True}
         if thread is not None:
             send_options["thread"] = thread
-        await webhook.send(content, **send_options)
-        sent = True
+        if view is None:
+            await webhook.send(content, **send_options)
+        else:
+            try:
+                message = await webhook.send(content, view=view, **send_options)
+            except discord.HTTPException as exc:
+                if exc.status != 400:
+                    raise
+                message = await webhook.send(content, **send_options)
+            retry_below = not message.components
     except Exception as exc:
         flat_webhooks.pop(channel.id, None)
         app_manage_webhooks = getattr(interaction.app_permissions, "manage_webhooks", None)
@@ -1067,15 +1083,25 @@ async def send_flat_response(interaction: discord.Interaction, content: str) -> 
             f"app_manage_webhooks={app_manage_webhooks}; channel={channel.id})."
         )
         try:
-            if interaction.response.is_done():
-                await interaction.edit_original_response(content=content)
+            if deferred:
+                await interaction.edit_original_response(content=content, view=view)
             else:
-                await interaction.response.send_message(content)
+                await send_response(interaction, content, view=view)
         except Exception as fallback_exc:
             print(f"Flat response fallback failed ({type(fallback_exc).__name__}).")
         return True
 
-    if sent:
+    if retry_below:
+        prompt = "같은 선택지로 다시 고를 수 있어요."
+        try:
+            await (thread or channel).send(prompt, view=view)
+        except discord.HTTPException:
+            if deferred:
+                await interaction.edit_original_response(content=prompt, view=view)
+                return True
+            await send_response(interaction, prompt, view=view)
+
+    if deferred:
         try:
             await interaction.delete_original_response()
         except Exception as exc:
@@ -6249,13 +6275,40 @@ async def choose(interaction: discord.Interaction, items: str) -> None:
     if len(choices) < 2:
         await send_response(interaction, "쉼표로 나눠서 선택지를 두 개 이상 입력해 주세요! 예: `빨강, 파랑, 초록`", ephemeral=True)
         return
+    await pick_choice(interaction, choices)
+
+
+async def pick_choice(interaction: discord.Interaction, choices: list[str]) -> None:
     if random.random() < 0.05:
-        message = "제가 대신 말씀드리겠습니다. 선택지가 전부 마음에 들지 않는군요. 다시 시도해주십시오."
-        if await send_flat_response(interaction, message):
+        message = (
+            "레레선배 대신 제가 대신 말씀드리겠습니다. 선택지 전부 아닌 것 같다는 느낌이군요. "
+            "그래도 같은 내용으로 다시 시도하고싶다면 아래 버튼을 눌러주십시오."
+        )
+        view = ChoiceRetryView(interaction.user.id, choices)
+        if await send_flat_response(interaction, message, view=view):
             return
-        await send_response(interaction, message)
+        await send_response(interaction, message, view=view)
         return
     await send_response(interaction, f"레레가 고른 건,  **[{random.choice(choices)}]** 예요!")
+
+
+class ChoiceRetryView(discord.ui.View):
+    def __init__(self, user_id: int, choices: list[str]) -> None:
+        super().__init__(timeout=600)
+        self.user_id = user_id
+        self.choices = choices
+
+    @discord.ui.button(label="다시하기", style=discord.ButtonStyle.primary)
+    async def retry(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.user_id:
+            await send_response(interaction, "처음 선택을 요청한 사람만 다시 할 수 있어요.", ephemeral=True)
+            return
+        if self.is_finished():
+            await send_response(interaction, "이미 다시하기를 눌렀어요.", ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.edit_message(view=None)
+        await pick_choice(interaction, self.choices)
 
 
 @bot.tree.command(name="기능판정", description="캐릭터와 기능을 골라 바로 판정해요!")

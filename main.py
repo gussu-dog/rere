@@ -5940,11 +5940,11 @@ class FamilySpellView(CombatActionView):
 
 
 
-async def start_combat(interaction: discord.Interaction, mode: str = "개인전", enemy_id: str = "") -> None:
+async def start_combat(interaction: discord.Interaction, mode: str = "개인전", enemy_id: str = "") -> bool:
     channel_id = interaction.channel_id
     if channel_id in combat_sessions:
         await send_response(interaction, "이 채널에는 이미 진행 중인 모의전투가 있어요.", ephemeral=True)
-        return
+        return False
     session = CombatSession(
         guild_id=interaction.guild_id or 0,
         channel_id=channel_id,
@@ -5957,6 +5957,7 @@ async def start_combat(interaction: discord.Interaction, mode: str = "개인전"
     combat_sessions[channel_id] = session
     await interaction.response.send_message(render_combat_session(session), view=CombatLobbyView(session))
     session.message = await interaction.original_response()
+    return True
 
 
 async def join_combat(interaction: discord.Interaction, character: str, *, expected_session: CombatSession | None = None) -> bool:
@@ -6010,31 +6011,50 @@ async def join_combat(interaction: discord.Interaction, character: str, *, expec
     return True
 
 
-combat_group = app_commands.Group(
-    name="모의전투",
-    description="개인전·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.",
-    guild_only=True,
-)
+class CombatRaidSelect(discord.ui.Select):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="모집할 레이드를 선택해 주세요",
+            options=[
+                discord.SelectOption(label="연습용 허수아비", value="dummy"),
+                discord.SelectOption(label="실험키메라", value="chimera"),
+                discord.SelectOption(label="꿈꾸는 고치", value="dream"),
+                discord.SelectOption(label="루베랄드의 칼날과 광기", value="hunter"),
+                discord.SelectOption(label="레레의 완벽한 식사", value="kitchen"),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if await start_combat(interaction, "레이드", self.values[0]):
+            view.stop()
+            try:
+                await view.command_interaction.edit_original_response(content="레이드 모집창을 열었어요!", view=None)
+            except discord.HTTPException as exc:
+                print(f"레이드 선택 메뉴 닫기 실패: {exc}")
 
 
-@combat_group.command(name="개인전", description="캐릭터끼리 싸우는 개인전을 모집해요.")
-async def combat_duel_command(interaction: discord.Interaction) -> None:
-    await start_combat(interaction, "개인전")
+class CombatRaidPicker(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction) -> None:
+        super().__init__(timeout=180)
+        self.command_interaction = interaction
+        self.add_item(CombatRaidSelect())
 
 
-@combat_group.command(name="레이드", description="레이드를 선택해서 참가자를 모집해요.")
-@app_commands.rename(raid="종류")
-@app_commands.choices(raid=[app_commands.Choice(name="연습용 허수아비", value="dummy"),
-                           app_commands.Choice(name="실험키메라", value="chimera"),
-                           app_commands.Choice(name="꿈꾸는 고치", value="dream"),
-                           app_commands.Choice(name="루베랄드의 칼날과 광기", value="hunter"),
-                           app_commands.Choice(name="레레의 완벽한 식사", value="kitchen")])
-@app_commands.describe(raid="모집할 레이드를 선택해 주세요.")
-async def combat_raid_command(interaction: discord.Interaction, raid: app_commands.Choice[str]) -> None:
-    await start_combat(interaction, "레이드", raid.value)
-
-
-bot.tree.add_command(combat_group)
+@bot.tree.command(name="모의전투", description="개인전·레이드를 모집해요! 참가는 모집창의 참여 버튼을 눌러 주세요.")
+@app_commands.guild_only()
+@app_commands.rename(mode="종류")
+@app_commands.choices(mode=[app_commands.Choice(name="개인전", value="duel"),
+                            app_commands.Choice(name="레이드", value="raid")])
+@app_commands.describe(mode="개인전 또는 레이드를 선택해 주세요.")
+async def combat_command(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+    if mode.value == "duel":
+        await start_combat(interaction, "개인전")
+        return
+    if interaction.channel_id in combat_sessions:
+        await send_response(interaction, "이 채널에는 이미 진행 중인 모의전투가 있어요.", ephemeral=True)
+        return
+    await interaction.response.send_message("모집할 레이드를 선택해 주세요.", view=CombatRaidPicker(interaction), ephemeral=True)
 
 
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")

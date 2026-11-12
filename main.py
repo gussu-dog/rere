@@ -6141,6 +6141,28 @@ async def combat_command(interaction: discord.Interaction, mode: app_commands.Ch
     await interaction.response.send_message("모집할 레이드를 선택해 주세요.", view=CombatRaidPicker(interaction), ephemeral=True)
 
 
+async def send_observation_rest(interaction: discord.Interaction, sheet_id: str, character_name: str) -> None:
+    activity, reaction = random.choice(OBSERVATION_REST_ACTIVITIES)
+    try:
+        same_sheet = await registry.get_character_tab_choices(sheet_id)
+        other_names = [
+            value.partition("|")[2].strip()
+            for value, _label in same_sheet
+            if value.partition("|")[2].strip().casefold() != character_name.casefold()
+        ]
+        if other_names and random.randrange(3) == 0:
+            partner = random.choice(other_names)
+            activity, reaction = personalize_activity(
+                random.choice(OBSERVATION_REST_WITH_OTHER), character_name, partner
+            )
+    except Exception as exc:
+        print(f"Observation rest character lookup failed ({type(exc).__name__}).")
+    await send_response(
+        interaction,
+        f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} {activity} {reaction}",
+    )
+
+
 @bot.tree.command(name="관찰", description="캐릭터들이 무엇을 하고 있는지 살펴보고 올게요!")
 @app_commands.rename(character="캐릭터")
 @app_commands.autocomplete(character=character_autocomplete)
@@ -6151,28 +6173,10 @@ async def observe(interaction: discord.Interaction, character: str) -> None:
         if resolved is None:
             await send_response(interaction, "등록된 캐릭터를 시트에서 찾지 못했어요. `/캐릭터등록`에서 다시 등록해 주세요!", ephemeral=True)
             return
-        _sheet_id, character_name = resolved
+        sheet_id, character_name = resolved
 
         if random.random() < 0.30:
-            activity, reaction = random.choice(OBSERVATION_REST_ACTIVITIES)
-            try:
-                same_sheet = await registry.get_character_tab_choices(_sheet_id)
-                other_names = [
-                    value.partition("|")[2].strip()
-                    for value, _label in same_sheet
-                    if value.partition("|")[2].strip().casefold() != character_name.casefold()
-                ]
-                if other_names and random.randrange(3) == 0:
-                    partner = random.choice(other_names)
-                    activity, reaction = personalize_activity(
-                        random.choice(OBSERVATION_REST_WITH_OTHER), character_name, partner
-                    )
-            except Exception as exc:
-                print(f"Observation rest character lookup failed ({type(exc).__name__}).")
-            await send_response(
-                interaction,
-                f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} {activity} {reaction}",
-            )
+            await send_observation_rest(interaction, sheet_id, character_name)
             return
 
         data = await registry._get_skill_data(character)
@@ -6189,39 +6193,40 @@ async def observe(interaction: discord.Interaction, character: str) -> None:
                 f"레레가 살짝 보고 왔는데, **{character_name}**{topic_particle(character_name)} {occupation_activity}",
             )
             return
-        candidates = []
+        invested = []
+        uninvested = []
+        investment_by_skill = {name.casefold(): points for name, points in (data.invested_points or {}).items()}
+        dexterity = next((v for k, v in data.values.items() if k.casefold() == "민첩"), None)
         for skill, value in data.values.items():
             base_name = skill.split("|", 1)[0].strip()
-            if base_name.casefold() in {name.casefold() for name in CHARACTERISTIC_NAMES}:
+            if base_name.casefold() in CHARACTERISTIC_NAMES:
                 continue
-            parts = skill.split("|", 1)
-            lookup_name = parts[1].strip() if len(parts) > 1 and parts[1].strip().casefold() == "수사과학" else base_name
-            default = SKILL_BASE_VALUES.get(lookup_name, 20)
-            dexterity = next((v for k, v in data.values.items() if k.casefold() == "민첩"), None)
-            if lookup_name.casefold() == "회피" and dexterity is not None:
-                default = dexterity // 2
-            candidates.append((skill, max(1, value - default + 1)))
-        if not candidates:
+            if data.invested_points is not None:
+                points = investment_by_skill.get(skill.casefold(), 0)
+            else:
+                parts = skill.split("|", 1)
+                lookup_name = parts[1].strip() if len(parts) > 1 and parts[1].strip().casefold() == "수사과학" else base_name
+                default = SKILL_BASE_VALUES.get(lookup_name, 20)
+                if lookup_name.casefold() == "회피" and dexterity is not None:
+                    default = dexterity // 2
+                points = max(0, value - default)
+
+            if points > 0:
+                invested.append((skill, points if data.invested_points is not None else points + 1))
+            else:
+                uninvested.append(skill)
+
+        if not invested and not uninvested:
             await send_response(interaction, "이 캐릭터의 기능치를 찾지 못했어요. 시트에 기능치가 있는지 확인해 주세요!")
             return
-
-        if data.invested_points is not None:
-            invested = []
-            uninvested = []
-            for skill, weight in candidates:
-                points = next((v for k, v in data.invested_points.items() if k.casefold() == skill.casefold()), 0)
-                if points > 0:
-                    invested.append((skill, points))
-                else:
-                    uninvested.append(skill)
-            if invested:
-                selected_skill = random.choice(uninvested) if uninvested and random.randrange(100) >= 95 else weighted_choice(invested)
-            else:
-                selected_skill = random.choice([skill for skill, _ in candidates])
+        if uninvested and random.randrange(200) == 0:
+            selected_skill = random.choice(uninvested)
+        elif invested:
+            selected_skill = weighted_choice(invested)
         else:
-            selected_skill = weighted_choice(candidates)
+            await send_observation_rest(interaction, sheet_id, character_name)
+            return
 
-        sheet_id, character_name = resolved
         other_names = []
         for value, _name in await registry.get_character_tab_choices(sheet_id):
             other_name = value.partition("|")[2]

@@ -80,7 +80,7 @@ class MafiaTests(unittest.TestCase):
             view.game = game
             view.revision = 0
             for player in game.alive():
-                game.actions[player.user_id] = None
+                game.actions[player.player_id] = None
             game.attacks = {1: None}
             with patch.object(m, "refresh", AsyncMock()):
                 run(view.callback_for("다음 단계")(interaction))
@@ -90,12 +90,61 @@ class MafiaTests(unittest.TestCase):
                 view.revision = game.revision
                 run(view.callback_for("다음 단계")(interaction))
                 self.assertEqual(game.phase, "투표")
-                game.votes = {p.user_id: None for p in game.alive()}
+                game.votes = {p.player_id: None for p in game.alive()}
                 view.revision = game.revision
                 run(view.callback_for("다음 단계")(interaction))
                 self.assertEqual((game.phase, game.day), ("밤", 2))
                 self.assertFalse(game.actions)
                 self.assertFalse(game.attacks)
+        m.sessions.clear()
+
+    def test_one_owner_controls_multiple_independent_characters(self):
+        game = fixture(["마피아", "경찰", "의사", "기자"])
+        m.sessions[10] = game
+        for player in game.players.values():
+            player.owner_id = 99
+        game.players[4].owner_id = 100
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()),
+                        edit_original_response=AsyncMock())
+        with patch.object(m, "refresh", AsyncMock()):
+            for actor, target, kind in [(1, 4, "attack"), (2, 1, "action"), (3, 2, "action")]:
+                select = m.TargetSelect(game, actor, kind)
+                select.game, select.player_id, select.kind = game, actor, kind
+                select.revision, select._values = game.revision, [str(target)]
+                run(select.callback(interaction))
+            self.assertEqual(game.attacks, {1: 4})
+            self.assertEqual(game.actions, {2: 1, 3: 2})
+            select.player_id = 4
+            run(select.callback(interaction))
+            self.assertNotIn(4, game.actions)
+            self.assertTrue(interaction.response.send_message.call_args.kwargs["ephemeral"])
+            panel = object.__new__(m.GameView)
+            panel.game, panel.revision = game, game.revision
+            run(panel.callback_for("내 역할 / 결과", 2)(interaction))
+            self.assertIn("경찰", interaction.response.send_message.call_args.args[0])
+            run(panel.callback_for("내 역할 / 결과", 4)(interaction))
+            self.assertNotIn("기자", interaction.response.send_message.call_args.args[0])
+        m.sessions.clear()
+
+    def test_character_registration_is_per_character_and_checks_duplicates(self):
+        game = m.Game(10, 99)
+        m.sessions[10] = game
+        choices = [("sheet|하나", "시트 | 하나"), ("sheet|둘", "시트 | 둘")]
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()),
+                        edit_original_response=AsyncMock())
+        select = m.CharacterJoinSelect(game, 99, choices, 0)
+        select.game, select.owner_id, select.choices = game, 99, choices
+        with patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(return_value=choices))), patch.object(m, "refresh", AsyncMock()):
+            for index in (0, 1, 0):
+                select._values = [str(index)]
+                run(select.callback(interaction))
+            self.assertEqual(len(game.players), 2)
+            self.assertEqual({p.owner_id for p in game.players.values()}, {99})
+            self.assertEqual(len({p.player_id for p in game.players.values()}), 2)
+            game.phase = "밤"
+            select._values = ["1"]
+            run(select.callback(interaction))
+            self.assertEqual(len(game.players), 2)
         m.sessions.clear()
 
 

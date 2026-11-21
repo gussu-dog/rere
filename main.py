@@ -6528,7 +6528,7 @@ async def main() -> None:
         await registry.close()
 
 
-mafia_game.install(bot)
+mafia_game.install(bot, registry)
 kitchen.bind(globals())
 
 if __name__ == "__main__":

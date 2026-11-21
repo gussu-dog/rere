@@ -20,16 +20,19 @@ DESCRIPTIONS = {
     "군인": "마피아의 밤 공격을 한 번 버텨요. 낮의 투표에는 적용되지 않아요.",
 }
 sessions: dict[int, Game] = {}
+character_registry = None
 
 
 @dataclass
 class Player:
-    user_id: int
+    player_id: int
     name: str
     role: str = ""
     alive: bool = True
     used: bool = False
     inbox: list[str] = field(default_factory=list)
+    owner_id: int = 0
+    character_value: str = ""
 
 
 @dataclass
@@ -151,7 +154,7 @@ class Game:
         news = "\n".join(discord.utils.escape_markdown(line) for line in self.news)
         progress = ""
         if self.phase == "밤":
-            attack_count = sum(p.user_id in self.attacks for p in self.alive() if p.role in MAFIA)
+            attack_count = sum(p.player_id in self.attacks for p in self.alive() if p.role in MAFIA)
             progress = f"\n밤 행동 {len(self.actions)}/{len(self.alive())} · 마피아 공격 {attack_count}/{sum(p.role in MAFIA for p in self.alive())}"
         elif self.phase == "투표":
             progress = f"\n투표 {len(self.votes)}/{len(self.alive())}"
@@ -172,23 +175,23 @@ async def refresh(game: Game) -> None:
 
 
 class TargetSelect(discord.ui.Select):
-    def __init__(self, game: Game, user_id: int, kind: str):
-        options = [discord.SelectOption(label=p.name[:100], value=str(p.user_id))
+    def __init__(self, game: Game, player_id: int, kind: str):
+        options = [discord.SelectOption(label=p.name[:100], value=str(p.player_id))
                    for p in game.alive()
-                   if kind == "vote" or (kind == "action" and game.players[user_id].role == "의사")
-                   or (p.user_id != user_id and (kind != "attack" or p.role not in MAFIA))]
+                   if kind == "vote" or (kind == "action" and game.players[player_id].role == "의사")
+                   or (p.player_id != player_id and (kind != "attack" or p.role not in MAFIA))]
         options.append(discord.SelectOption(label="사용하지 않기 / 기권", value="skip"))
         super().__init__(placeholder="대상을 골라 주세요", options=options)
-        self.game, self.user_id, self.kind = game, user_id, kind
+        self.game, self.player_id, self.kind = game, player_id, kind
         self.revision = game.revision
 
     async def callback(self, interaction: discord.Interaction) -> None:
         game = self.game
         async with game.lock:
             valid_phase = "투표" if self.kind == "vote" else "밤"
-            if (interaction.user.id != self.user_id or game.phase != valid_phase
+            if (interaction.user.id != game.players[self.player_id].owner_id or game.phase != valid_phase
                     or game.revision != self.revision or sessions.get(game.channel_id) is not game
-                    or not game.players[self.user_id].alive):
+                    or not game.players[self.player_id].alive):
                 await interaction.response.send_message("현재 사용할 수 없는 선택창이에요.", ephemeral=True)
                 return
             target = None if self.values[0] == "skip" else int(self.values[0])
@@ -197,16 +200,82 @@ class TargetSelect(discord.ui.Select):
                 return
             await interaction.response.defer()
             collection = game.votes if self.kind == "vote" else game.attacks if self.kind == "attack" else game.actions
-            collection[self.user_id] = target
+            collection[self.player_id] = target
             name = game.players[target].name if target is not None else "기권"
             await interaction.edit_original_response(content=f"선택을 저장했어요. {discord.utils.escape_markdown(name)}", view=None)
             await refresh(game)
 
 
 class TargetView(discord.ui.View):
-    def __init__(self, game: Game, user_id: int, kind: str):
+    def __init__(self, game: Game, player_id: int, kind: str):
         super().__init__(timeout=None)
-        self.add_item(TargetSelect(game, user_id, kind))
+        self.add_item(TargetSelect(game, player_id, kind))
+
+
+class ActorSelect(discord.ui.Select):
+    def __init__(self, panel: GameView, label: str, players: list[Player]):
+        super().__init__(placeholder="조종할 캐릭터", options=[
+            discord.SelectOption(label=p.name[:100], value=str(p.player_id)) for p in players])
+        self.panel = panel
+        self.action = label
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.panel.callback_for(self.action, int(self.values[0]))(interaction)
+
+
+class ActorView(discord.ui.View):
+    def __init__(self, panel: GameView, label: str, players: list[Player]):
+        super().__init__(timeout=None)
+        self.add_item(ActorSelect(panel, label, players))
+
+
+class CharacterJoinSelect(discord.ui.Select):
+    def __init__(self, game: Game, owner_id: int, choices: list[tuple[str, str]], page: int):
+        start = page * 25
+        super().__init__(placeholder="참가시킬 캐릭터", options=[
+            discord.SelectOption(label=name[:100], value=str(index))
+            for index, (value, name) in enumerate(choices[start:start + 25], start)])
+        self.game, self.owner_id, self.choices = game, owner_id, choices
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("본인의 캐릭터 선택창을 이용해 주세요.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        value, name = self.choices[int(self.values[0])]
+        owned = await character_registry.get_character_choices_for_user(self.owner_id)
+        if value not in {item[0] for item in owned}:
+            await interaction.edit_original_response(content="현재 등록된 캐릭터를 다시 선택해 주세요.", view=None)
+            return
+        game = self.game
+        async with game.lock:
+            if sessions.get(game.channel_id) is not game or game.phase != "모집":
+                await interaction.edit_original_response(content="이미 종료된 모집이에요.", view=None)
+                return
+            if len(game.players) >= 7 or any(p.character_value.casefold() == value.casefold() for p in game.players.values()):
+                await interaction.edit_original_response(content="이미 참가했거나 모집 정원이 찼어요.", view=None)
+                return
+            player_id = max(game.players, default=0) + 1
+            game.players[player_id] = Player(player_id, name, owner_id=self.owner_id, character_value=value)
+            await interaction.edit_original_response(content=f"{discord.utils.escape_markdown(name)} 참가 완료!", view=None)
+            await refresh(game)
+
+
+class CharacterJoinView(discord.ui.View):
+    def __init__(self, game: Game, owner_id: int, choices: list[tuple[str, str]], page: int = 0):
+        super().__init__(timeout=None)
+        self.add_item(CharacterJoinSelect(game, owner_id, choices, page))
+        for step, label in [(-1, "이전"), (1, "다음")]:
+            next_page = page + step
+            if 0 <= next_page < (len(choices) + 24) // 25:
+                button = discord.ui.Button(label=label, row=1)
+                async def change_page(interaction: discord.Interaction, target: int = next_page) -> None:
+                    if interaction.user.id != owner_id:
+                        await interaction.response.send_message("본인의 선택창을 이용해 주세요.", ephemeral=True)
+                        return
+                    await interaction.response.edit_message(view=CharacterJoinView(game, owner_id, choices, target))
+                button.callback = change_page
+                self.add_item(button)
 
 
 class GameView(discord.ui.View):
@@ -229,26 +298,47 @@ class GameView(discord.ui.View):
                 button.disabled = game.phase != "투표"
             self.add_item(button)
 
-    def callback_for(self, label: str):
+    def callback_for(self, label: str, player_id: int | None = None):
         async def callback(interaction: discord.Interaction) -> None:
             game = self.game
             async with game.lock:
                 if sessions.get(game.channel_id) is not game or game.phase == "종료" or self.revision != game.revision:
                     await interaction.response.send_message("이미 종료된 게임이에요.", ephemeral=True)
                     return
-                player = game.players.get(interaction.user.id)
+                player = game.players.get(player_id)
+                personal = {"내 역할 / 결과", "밤 행동", "마피아 공격", "투표"}
+                if label in personal and player_id is None:
+                    owned = [p for p in game.players.values() if p.owner_id == interaction.user.id
+                             and (label == "내 역할 / 결과" or p.alive)]
+                    if not owned:
+                        await interaction.response.send_message("이 행동을 할 수 있는 참가 캐릭터가 없어요.", ephemeral=True)
+                        return
+                    await interaction.response.send_message("어느 캐릭터로 진행할까요?",
+                                                            view=ActorView(self, label, owned), ephemeral=True)
+                    return
+                if label in personal and (player is None or player.owner_id != interaction.user.id):
+                    await interaction.response.send_message("본인이 참가시킨 캐릭터만 조종할 수 있어요.", ephemeral=True)
+                    return
                 if label in {"시작", "모집 취소", "다음 단계", "게임 종료"} and interaction.user.id != game.owner_id:
                     await interaction.response.send_message("모집한 사람만 진행할 수 있어요.", ephemeral=True)
                     return
                 if label == "참여" and game.phase == "모집":
-                    if player is None:
-                        if len(game.players) >= 7:
-                            await interaction.response.send_message("최대 7명까지 참가할 수 있어요.", ephemeral=True)
-                            return
-                        game.players[interaction.user.id] = Player(interaction.user.id, interaction.user.display_name)
+                    if len(game.players) >= 7:
+                        await interaction.response.send_message("최대 7캐릭터까지 참가할 수 있어요.", ephemeral=True)
+                        return
+                    await interaction.response.defer(ephemeral=True, thinking=True)
+                    choices = await character_registry.get_character_choices_for_user(interaction.user.id)
+                    joined = {p.character_value.casefold() for p in game.players.values()}
+                    choices = [(value, name) for value, name in choices if value.casefold() not in joined]
+                    if not choices:
+                        await interaction.followup.send("참가할 캐릭터가 없어요. /캐릭터등록으로 먼저 등록해 주세요.", ephemeral=True)
+                        return
+                    await interaction.followup.send("참가시킬 캐릭터를 골라 주세요.",
+                                                    view=CharacterJoinView(game, interaction.user.id, choices), ephemeral=True)
+                    return
                 elif label == "시작" and game.phase == "모집":
                     if len(game.players) < 4:
-                        await interaction.response.send_message("경찰·의사를 포함해 최소 4명이 필요해요.", ephemeral=True)
+                        await interaction.response.send_message("경찰·의사를 포함해 최소 4캐릭터가 필요해요.", ephemeral=True)
                         return
                     game.start()
                 elif label in {"모집 취소", "게임 종료"}:
@@ -271,17 +361,17 @@ class GameView(discord.ui.View):
                         await interaction.response.send_message("마피아 진영만 사용할 수 있어요.", ephemeral=True)
                         return
                     if label == "밤 행동" and (player.role in {"군인", "마피아", "스파이"} or player.role == "기자" and player.used):
-                        game.actions[player.user_id] = None
+                        game.actions[player.player_id] = None
                         await interaction.response.send_message("오늘 밤은 별도 능력 없이 기다려요. 마피아 진영은 공격도 선택해 주세요.", ephemeral=True)
                         await refresh(game)
                         return
                     kind = "vote" if label == "투표" else "attack" if label == "마피아 공격" else "action"
                     await interaction.response.send_message("대상을 선택해 주세요. 같은 버튼으로 다시 선택하면 변경할 수 있어요.",
-                                                            view=TargetView(game, player.user_id, kind), ephemeral=True)
+                                                            view=TargetView(game, player.player_id, kind), ephemeral=True)
                     return
                 elif label == "다음 단계":
                     if game.phase == "밤":
-                        if any(p.user_id not in game.actions or p.role in MAFIA and p.user_id not in game.attacks for p in game.alive()):
+                        if any(p.player_id not in game.actions or p.role in MAFIA and p.player_id not in game.attacks for p in game.alive()):
                             await interaction.response.send_message("모두 밤 행동을 확인해야 해요. 마피아 진영은 공격도 선택해야 해요.", ephemeral=True)
                             return
                         game.resolve_night()
@@ -290,7 +380,7 @@ class GameView(discord.ui.View):
                         game.revision += 1
                         game.news = ["토론을 마쳤어요. 투표 버튼으로 한 명을 고르거나 기권해 주세요."]
                     elif game.phase == "투표":
-                        if any(p.user_id not in game.votes for p in game.alive()):
+                        if any(p.player_id not in game.votes for p in game.alive()):
                             await interaction.response.send_message("모두 투표해야 해요. 기권도 선택할 수 있어요.", ephemeral=True)
                             return
                         game.resolve_vote()
@@ -307,8 +397,10 @@ class GameView(discord.ui.View):
         return callback
 
 
-def install(bot) -> None:
-    @bot.tree.command(name="마피아게임", description="참여 버튼으로 모여 역할을 배정하고 마피아게임을 진행해요!")
+def install(bot, registry) -> None:
+    global character_registry
+    character_registry = registry
+    @bot.tree.command(name="마피아게임", description="캐릭터 4~7명으로 마피아게임을 진행해요! 한 사람이 여러 캐릭터로 참가할 수 있어요.")
     @app_commands.guild_only()
     async def mafia_game(interaction: discord.Interaction) -> None:
         existing = sessions.get(interaction.channel_id)

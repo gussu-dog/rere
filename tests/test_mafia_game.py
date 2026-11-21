@@ -152,7 +152,7 @@ class MafiaTests(unittest.TestCase):
         m.sessions[10] = game
         panel = object.__new__(m.GameView)
         panel.game, panel.revision = game, 0
-        interaction = S(user=S(id=99), response=S(defer=AsyncMock()),
+        interaction = S(user=S(id=99), response=S(send_message=AsyncMock()),
                         edit_original_response=AsyncMock())
         async def immediate(awaitable, timeout):
             self.assertFalse(game.lock.locked())

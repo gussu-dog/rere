@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import traceback
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -194,6 +195,20 @@ async def refresh(game: Game) -> None:
         await game.message.edit(content=game.render(), view=GameView(game), allowed_mentions=discord.AllowedMentions.none())
 
 
+class MafiaView(discord.ui.View):
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        print(f"Mafia interaction failed ({type(error).__name__}; HTTP {getattr(error, 'status', None)}; code {getattr(error, 'code', None)}).", flush=True)
+        print("".join(traceback.format_tb(error.__traceback__)), flush=True)
+        message = "마피아게임 처리 중 오류가 났어요. 같은 버튼을 다시 눌러 주세요."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception as notify_error:
+            print(f"Mafia error notice failed ({type(notify_error).__name__}).", flush=True)
+
+
 class TargetSelect(discord.ui.Select):
     def __init__(self, game: Game, player_id: int, kind: str):
         options = [discord.SelectOption(label=p.name[:100], value=str(p.player_id))
@@ -226,7 +241,7 @@ class TargetSelect(discord.ui.Select):
             await refresh(game)
 
 
-class TargetView(discord.ui.View):
+class TargetView(MafiaView):
     def __init__(self, game: Game, player_id: int, kind: str):
         super().__init__(timeout=None)
         self.add_item(TargetSelect(game, player_id, kind))
@@ -243,7 +258,7 @@ class ActorSelect(discord.ui.Select):
         await self.panel.callback_for(self.action, int(self.values[0]))(interaction)
 
 
-class ActorView(discord.ui.View):
+class ActorView(MafiaView):
     def __init__(self, panel: GameView, label: str, players: list[Player]):
         super().__init__(timeout=None)
         self.add_item(ActorSelect(panel, label, players))
@@ -281,7 +296,7 @@ class CharacterJoinSelect(discord.ui.Select):
             await refresh(game)
 
 
-class CharacterJoinView(discord.ui.View):
+class CharacterJoinView(MafiaView):
     def __init__(self, game: Game, owner_id: int, choices: list[tuple[str, str]], page: int = 0):
         super().__init__(timeout=None)
         self.add_item(CharacterJoinSelect(game, owner_id, choices, page))
@@ -298,7 +313,7 @@ class CharacterJoinView(discord.ui.View):
                 self.add_item(button)
 
 
-class GameView(discord.ui.View):
+class GameView(MafiaView):
     def __init__(self, game: Game):
         super().__init__(timeout=None)
         self.game = game
@@ -308,7 +323,10 @@ class GameView(discord.ui.View):
         if game.phase == "종료":
             labels = []
         for label in labels:
-            button = discord.ui.Button(label=label, row=0 if len(self.children) < 3 else 1)
+            button = discord.ui.Button(
+                label=label, row=0 if len(self.children) < 3 else 1,
+                custom_id=f"mafia:{game.channel_id}:{game.revision}:{label}",
+            )
             button.callback = self.callback_for(label)
             if label == "밤 행동":
                 button.disabled = game.phase != "밤"
@@ -320,11 +338,14 @@ class GameView(discord.ui.View):
 
     async def open_join_picker(self, interaction: discord.Interaction) -> None:
         game = self.game
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        print("Mafia join: received; sending private loading message.", flush=True)
+        await interaction.response.send_message("참가할 캐릭터 목록을 불러오고 있어요.", ephemeral=True)
+        print("Mafia join: loading message sent; reading registered characters.", flush=True)
         try:
             choices = await asyncio.wait_for(
                 character_registry.get_character_choices_for_user(interaction.user.id), timeout=15,
             )
+            print(f"Mafia join: character list ready ({len(choices)}); updating picker.", flush=True)
             async with game.lock:
                 if sessions.get(game.channel_id) is not game or game.phase != "모집":
                     await interaction.edit_original_response(content="이미 종료된 모집이에요.", view=None)
@@ -344,8 +365,10 @@ class GameView(discord.ui.View):
                     content="참가시킬 캐릭터를 골라 주세요.",
                     view=CharacterJoinView(game, interaction.user.id, choices),
                 )
+                print("Mafia join: character picker displayed.", flush=True)
         except Exception as exc:
-            print(f"Mafia character picker failed ({type(exc).__name__}).")
+            print(f"Mafia character picker failed ({type(exc).__name__}; HTTP {getattr(exc, 'status', None)}; code {getattr(exc, 'code', None)}).", flush=True)
+            print("".join(traceback.format_tb(exc.__traceback__)), flush=True)
             await interaction.edit_original_response(
                 content="캐릭터 목록을 불러오지 못했어요. /캐릭터목록에서 등록 상태를 확인한 뒤 참여를 다시 눌러 주세요.",
                 view=None,
@@ -443,6 +466,16 @@ class GameView(discord.ui.View):
 def install(bot, registry) -> None:
     global character_registry
     character_registry = registry
+    print("Mafia UI loaded: character-join diagnostic v2.", flush=True)
+
+    async def trace_mafia_button(interaction: discord.Interaction) -> None:
+        data = interaction.data or {}
+        custom_id = data.get("custom_id", "")
+        if isinstance(custom_id, str) and custom_id.startswith("mafia:"):
+            print(f"Mafia component received ({custom_id}).", flush=True)
+
+    bot.add_listener(trace_mafia_button, "on_interaction")
+
     @bot.tree.command(name="마피아게임", description="캐릭터 4~7명으로 마피아게임을 진행해요! 한 사람이 여러 캐릭터로 참가할 수 있어요.")
     @app_commands.guild_only()
     async def mafia_game(interaction: discord.Interaction) -> None:

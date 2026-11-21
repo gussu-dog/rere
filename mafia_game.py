@@ -146,8 +146,7 @@ class Game:
         self.news.append("밤이 됐어요! 밤 행동을 골라 주세요.")
 
     def render(self) -> str:
-        symbols = {"모집": "🎭", "밤": "🌙", "토론": "☀️", "투표": "🗳️", "종료": "🏁"}
-        lines = [f"## {symbols[self.phase]} 마피아게임",
+        lines = [f"## 마피아게임",
                  f"**{self.day}일째 · {self.phase}**", "━━━━━━━━━━━━"]
         if self.phase == "모집":
             lines.append(f"### 참가 캐릭터 · {len(self.players)}/7")
@@ -278,7 +277,7 @@ class CharacterJoinSelect(discord.ui.Select):
                 return
             player_id = max(game.players, default=0) + 1
             game.players[player_id] = Player(player_id, name, owner_id=self.owner_id, character_value=value)
-            await interaction.edit_original_response(content=f"🎭 **{discord.utils.escape_markdown(name)}** 참가 완료!", view=None)
+            await interaction.edit_original_response(content=f"**{discord.utils.escape_markdown(name)}** 참가 완료!", view=None)
             await refresh(game)
 
 
@@ -367,7 +366,7 @@ class GameView(discord.ui.View):
                     game.news = ["게임을 종료했어요."]
                 elif label == "내 역할 / 결과" and player and game.phase != "모집":
                     partners = ", ".join(discord.utils.escape_markdown(p.name) for p in game.players.values() if p.role in MAFIA)
-                    text = f"## 🎭 {discord.utils.escape_markdown(player.name)}\n**역할 · {player.role}**\n> {DESCRIPTIONS[player.role]}"
+                    text = f"## {discord.utils.escape_markdown(player.name)}\n**역할 · {player.role}**\n> {DESCRIPTIONS[player.role]}"
                     if player.role in MAFIA:
                         text += f"\n마피아 진영 구성원 · {partners}"
                     if player.inbox:

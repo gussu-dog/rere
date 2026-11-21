@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import mafia_game
 import kitchen_raid as kitchen
 
 import aiohttp
@@ -6527,6 +6528,7 @@ async def main() -> None:
         await registry.close()
 
 
+mafia_game.install(bot)
 kitchen.bind(globals())
 
 if __name__ == "__main__":

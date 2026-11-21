@@ -134,6 +134,10 @@ class MafiaTests(unittest.TestCase):
                         edit_original_response=AsyncMock())
         select = m.CharacterJoinSelect(game, 99, choices, 0)
         select.game, select.owner_id, select.choices = game, 99, choices
+        outsider = S(user=S(id=100), response=S(send_message=AsyncMock()))
+        run(select.callback(outsider))
+        self.assertFalse(game.players)
+        self.assertTrue(outsider.response.send_message.call_args.kwargs["ephemeral"])
         with patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(return_value=choices))), patch.object(m, "refresh", AsyncMock()):
             for index in (0, 1, 0):
                 select._values = [str(index)]
@@ -147,28 +151,29 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual(len(game.players), 2)
         m.sessions.clear()
 
-    def test_participation_edits_loading_response_and_reports_lookup_errors(self):
+    def test_participation_posts_public_picker_and_reports_lookup_errors(self):
         game = m.Game(10, 99)
         m.sessions[10] = game
         panel = object.__new__(m.GameView)
         panel.game, panel.revision = game, 0
-        interaction = S(user=S(id=99), response=S(send_message=AsyncMock()),
-                        edit_original_response=AsyncMock())
+        picker_message = S(edit=AsyncMock())
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock()),
+                        channel=S(send=AsyncMock(return_value=picker_message)))
         async def immediate(awaitable, timeout):
             self.assertFalse(game.lock.locked())
             return await awaitable
         choices = [("sheet|one", "one")]
         with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "CharacterJoinView", return_value="picker"), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(return_value=choices))):
             run(panel.callback_for("참여")(interaction))
-            self.assertEqual(interaction.edit_original_response.call_args.kwargs["view"], "picker")
+            self.assertEqual(picker_message.edit.call_args.kwargs["view"], "picker")
             self.assertEqual(len(game.players), 0)
         with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(side_effect=TimeoutError))):
             run(panel.callback_for("참여")(interaction))
-            self.assertIsNone(interaction.edit_original_response.call_args.kwargs["view"])
-            self.assertIn("불러오지 못", interaction.edit_original_response.call_args.kwargs["content"])
+            self.assertIsNone(picker_message.edit.call_args.kwargs["view"])
+            self.assertIn("불러오지 못", picker_message.edit.call_args.kwargs["content"])
         with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(return_value=[]))):
             run(panel.callback_for("참여")(interaction))
-            self.assertIn("참가할 캐릭터가 없", interaction.edit_original_response.call_args.kwargs["content"])
+            self.assertIn("참가할 캐릭터가 없", picker_message.edit.call_args.kwargs["content"])
         m.sessions.clear()
 
 

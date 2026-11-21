@@ -338,8 +338,12 @@ class GameView(MafiaView):
 
     async def open_join_picker(self, interaction: discord.Interaction) -> None:
         game = self.game
-        print("Mafia join: received; sending private loading message.", flush=True)
-        await interaction.response.send_message("참가할 캐릭터 목록을 불러오고 있어요.", ephemeral=True)
+        print("Mafia join: received; sending channel character picker.", flush=True)
+        await interaction.response.defer()
+        picker_message = await interaction.channel.send(
+            "참가할 캐릭터 목록을 불러오고 있어요.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         print("Mafia join: loading message sent; reading registered characters.", flush=True)
         try:
             choices = await asyncio.wait_for(
@@ -348,20 +352,20 @@ class GameView(MafiaView):
             print(f"Mafia join: character list ready ({len(choices)}); updating picker.", flush=True)
             async with game.lock:
                 if sessions.get(game.channel_id) is not game or game.phase != "모집":
-                    await interaction.edit_original_response(content="이미 종료된 모집이에요.", view=None)
+                    await picker_message.edit(content="이미 종료된 모집이에요.", view=None)
                     return
                 if len(game.players) >= 7:
-                    await interaction.edit_original_response(content="최대 7캐릭터까지 참가할 수 있어요.", view=None)
+                    await picker_message.edit(content="최대 7캐릭터까지 참가할 수 있어요.", view=None)
                     return
                 joined = {p.character_value.casefold() for p in game.players.values()}
                 choices = [(value, name) for value, name in choices if value.casefold() not in joined]
                 if not choices:
-                    await interaction.edit_original_response(
+                    await picker_message.edit(
                         content="참가할 캐릭터가 없어요. /캐릭터등록으로 등록해 주세요. 이미 참가한 캐릭터는 목록에서 빠져요.",
                         view=None,
                     )
                     return
-                await interaction.edit_original_response(
+                await picker_message.edit(
                     content="참가시킬 캐릭터를 골라 주세요.",
                     view=CharacterJoinView(game, interaction.user.id, choices),
                 )
@@ -369,7 +373,7 @@ class GameView(MafiaView):
         except Exception as exc:
             print(f"Mafia character picker failed ({type(exc).__name__}; HTTP {getattr(exc, 'status', None)}; code {getattr(exc, 'code', None)}).", flush=True)
             print("".join(traceback.format_tb(exc.__traceback__)), flush=True)
-            await interaction.edit_original_response(
+            await picker_message.edit(
                 content="캐릭터 목록을 불러오지 못했어요. /캐릭터목록에서 등록 상태를 확인한 뒤 참여를 다시 눌러 주세요.",
                 view=None,
             )
@@ -466,7 +470,7 @@ class GameView(MafiaView):
 def install(bot, registry) -> None:
     global character_registry
     character_registry = registry
-    print("Mafia UI loaded: character-join diagnostic v2.", flush=True)
+    print("Mafia UI loaded: public-character-picker v3.", flush=True)
 
     async def trace_mafia_button(interaction: discord.Interaction) -> None:
         data = interaction.data or {}

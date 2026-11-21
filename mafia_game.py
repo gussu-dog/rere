@@ -146,19 +146,40 @@ class Game:
         self.news.append("밤이 됐어요! 밤 행동을 골라 주세요.")
 
     def render(self) -> str:
-        names = "\n".join(
-            f"{discord.utils.escape_markdown(p.name)} · "
-            + (p.role if self.phase == "종료" else "생존" if p.alive else "탈락")
-            for p in self.players.values()
-        )
-        news = "\n".join(discord.utils.escape_markdown(line) for line in self.news)
-        progress = ""
+        symbols = {"모집": "🎭", "밤": "🌙", "토론": "☀️", "투표": "🗳️", "종료": "🏁"}
+        lines = [f"## {symbols[self.phase]} 마피아게임",
+                 f"**{self.day}일째 · {self.phase}**", "━━━━━━━━━━━━"]
+        if self.phase == "모집":
+            lines.append(f"### 참가 캐릭터 · {len(self.players)}/7")
+        else:
+            lines.append(f"### 참가 캐릭터 · 생존 {len(self.alive())}/{len(self.players)}")
+        for player in self.players.values():
+            name = discord.utils.escape_markdown(player.name)
+            if self.phase == "종료":
+                lines.append(f"- **{name}** · {player.role} · {'생존' if player.alive else '탈락'}")
+            elif player.alive:
+                lines.append(f"- **{name}**")
+            else:
+                lines.append(f"- ~~{name}~~ · 탈락")
+        if not self.players:
+            lines.append("아직 참가한 캐릭터가 없어요.")
         if self.phase == "밤":
             attack_count = sum(p.player_id in self.attacks for p in self.alive() if p.role in MAFIA)
-            progress = f"\n밤 행동 {len(self.actions)}/{len(self.alive())} · 마피아 공격 {attack_count}/{sum(p.role in MAFIA for p in self.alive())}"
+            mafia_count = sum(p.role in MAFIA for p in self.alive())
+            lines.append(f"\n**밤 행동** {len(self.actions)}/{len(self.alive())} · **공격 선택** {attack_count}/{mafia_count}")
         elif self.phase == "투표":
-            progress = f"\n투표 {len(self.votes)}/{len(self.alive())}"
-        return f"**마피아게임 · {self.day}일 · {self.phase}**\n{names or '참가자를 기다리고 있어요!'}{progress}\n\n{news}"
+            lines.append(f"\n**투표 완료** {len(self.votes)}/{len(self.alive())}")
+        lines.append("\n━━━━━━━━━━━━")
+        lines.extend(f"> {discord.utils.escape_markdown(line)}" for line in self.news)
+        guides = {
+            "모집": "**참여**로 캐릭터를 골라 주세요! 4캐릭터 이상 모이면 모집자가 **시작**을 눌러요.",
+            "밤": "**내 역할 / 결과**에서 역할을 확인하고 **밤 행동**을 골라 주세요. 마피아 진영은 **마피아 공격**도 선택해요.",
+            "토론": "캐릭터끼리 이야기를 나눠 주세요. 토론이 끝나면 모집자가 **다음 단계**를 눌러요.",
+            "투표": "**투표**에서 캐릭터별로 한 표씩 골라 주세요. 전원 완료 후 모집자가 **다음 단계**를 눌러요.",
+        }
+        if self.phase in guides:
+            lines.append(f"\n{guides[self.phase]}")
+        return "\n".join(lines)
 
 
 def unique_most_voted(values: list[int]) -> int | None:
@@ -202,7 +223,7 @@ class TargetSelect(discord.ui.Select):
             collection = game.votes if self.kind == "vote" else game.attacks if self.kind == "attack" else game.actions
             collection[self.player_id] = target
             name = game.players[target].name if target is not None else "기권"
-            await interaction.edit_original_response(content=f"선택을 저장했어요. {discord.utils.escape_markdown(name)}", view=None)
+            await interaction.edit_original_response(content=f"**{discord.utils.escape_markdown(game.players[self.player_id].name)}** 선택 완료!\n> {discord.utils.escape_markdown(name)}", view=None)
             await refresh(game)
 
 
@@ -257,7 +278,7 @@ class CharacterJoinSelect(discord.ui.Select):
                 return
             player_id = max(game.players, default=0) + 1
             game.players[player_id] = Player(player_id, name, owner_id=self.owner_id, character_value=value)
-            await interaction.edit_original_response(content=f"{discord.utils.escape_markdown(name)} 참가 완료!", view=None)
+            await interaction.edit_original_response(content=f"🎭 **{discord.utils.escape_markdown(name)}** 참가 완료!", view=None)
             await refresh(game)
 
 
@@ -346,10 +367,11 @@ class GameView(discord.ui.View):
                     game.news = ["게임을 종료했어요."]
                 elif label == "내 역할 / 결과" and player and game.phase != "모집":
                     partners = ", ".join(discord.utils.escape_markdown(p.name) for p in game.players.values() if p.role in MAFIA)
-                    text = f"**{player.role}**\n{DESCRIPTIONS[player.role]}"
+                    text = f"## 🎭 {discord.utils.escape_markdown(player.name)}\n**역할 · {player.role}**\n> {DESCRIPTIONS[player.role]}"
                     if player.role in MAFIA:
                         text += f"\n마피아 진영 구성원 · {partners}"
-                    text += "\n" + "\n".join(player.inbox[-6:])
+                    if player.inbox:
+                        text += "\n\n### 전달받은 정보\n" + "\n".join(f"> {discord.utils.escape_markdown(result)}" for result in player.inbox[-6:])
                     await interaction.response.send_message(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
                     return
                 elif label in {"밤 행동", "마피아 공격", "투표"} and player and player.alive:
@@ -366,7 +388,7 @@ class GameView(discord.ui.View):
                         await refresh(game)
                         return
                     kind = "vote" if label == "투표" else "attack" if label == "마피아 공격" else "action"
-                    await interaction.response.send_message("대상을 선택해 주세요. 같은 버튼으로 다시 선택하면 변경할 수 있어요.",
+                    await interaction.response.send_message(f"**{discord.utils.escape_markdown(player.name)} · {label}**\n대상을 골라 주세요. 같은 버튼으로 다시 선택하면 변경할 수 있어요.",
                                                             view=TargetView(game, player.player_id, kind), ephemeral=True)
                     return
                 elif label == "다음 단계":

@@ -147,6 +147,30 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual(len(game.players), 2)
         m.sessions.clear()
 
+    def test_participation_edits_loading_response_and_reports_lookup_errors(self):
+        game = m.Game(10, 99)
+        m.sessions[10] = game
+        panel = object.__new__(m.GameView)
+        panel.game, panel.revision = game, 0
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock()),
+                        edit_original_response=AsyncMock())
+        async def immediate(awaitable, timeout):
+            self.assertFalse(game.lock.locked())
+            return await awaitable
+        choices = [("sheet|one", "one")]
+        with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "CharacterJoinView", return_value="picker"), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(return_value=choices))):
+            run(panel.callback_for("참여")(interaction))
+            self.assertEqual(interaction.edit_original_response.call_args.kwargs["view"], "picker")
+            self.assertEqual(len(game.players), 0)
+        with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(side_effect=TimeoutError))):
+            run(panel.callback_for("참여")(interaction))
+            self.assertIsNone(interaction.edit_original_response.call_args.kwargs["view"])
+            self.assertIn("불러오지 못", interaction.edit_original_response.call_args.kwargs["content"])
+        with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(return_value=[]))):
+            run(panel.callback_for("참여")(interaction))
+            self.assertIn("참가할 캐릭터가 없", interaction.edit_original_response.call_args.kwargs["content"])
+        m.sessions.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

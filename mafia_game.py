@@ -318,9 +318,45 @@ class GameView(discord.ui.View):
                 button.disabled = game.phase != "투표"
             self.add_item(button)
 
+    async def open_join_picker(self, interaction: discord.Interaction) -> None:
+        game = self.game
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            choices = await asyncio.wait_for(
+                character_registry.get_character_choices_for_user(interaction.user.id), timeout=15,
+            )
+            async with game.lock:
+                if sessions.get(game.channel_id) is not game or game.phase != "모집":
+                    await interaction.edit_original_response(content="이미 종료된 모집이에요.", view=None)
+                    return
+                if len(game.players) >= 7:
+                    await interaction.edit_original_response(content="최대 7캐릭터까지 참가할 수 있어요.", view=None)
+                    return
+                joined = {p.character_value.casefold() for p in game.players.values()}
+                choices = [(value, name) for value, name in choices if value.casefold() not in joined]
+                if not choices:
+                    await interaction.edit_original_response(
+                        content="참가할 캐릭터가 없어요. /캐릭터등록으로 등록해 주세요. 이미 참가한 캐릭터는 목록에서 빠져요.",
+                        view=None,
+                    )
+                    return
+                await interaction.edit_original_response(
+                    content="참가시킬 캐릭터를 골라 주세요.",
+                    view=CharacterJoinView(game, interaction.user.id, choices),
+                )
+        except Exception as exc:
+            print(f"Mafia character picker failed ({type(exc).__name__}).")
+            await interaction.edit_original_response(
+                content="캐릭터 목록을 불러오지 못했어요. /캐릭터목록에서 등록 상태를 확인한 뒤 참여를 다시 눌러 주세요.",
+                view=None,
+            )
+
     def callback_for(self, label: str, player_id: int | None = None):
         async def callback(interaction: discord.Interaction) -> None:
             game = self.game
+            if label == "참여":
+                await self.open_join_picker(interaction)
+                return
             async with game.lock:
                 if sessions.get(game.channel_id) is not game or game.phase == "종료" or self.revision != game.revision:
                     await interaction.response.send_message("이미 종료된 게임이에요.", ephemeral=True)
@@ -342,21 +378,7 @@ class GameView(discord.ui.View):
                 if label in {"시작", "모집 취소", "다음 단계", "게임 종료"} and interaction.user.id != game.owner_id:
                     await interaction.response.send_message("모집한 사람만 진행할 수 있어요.", ephemeral=True)
                     return
-                if label == "참여" and game.phase == "모집":
-                    if len(game.players) >= 7:
-                        await interaction.response.send_message("최대 7캐릭터까지 참가할 수 있어요.", ephemeral=True)
-                        return
-                    await interaction.response.defer(ephemeral=True, thinking=True)
-                    choices = await character_registry.get_character_choices_for_user(interaction.user.id)
-                    joined = {p.character_value.casefold() for p in game.players.values()}
-                    choices = [(value, name) for value, name in choices if value.casefold() not in joined]
-                    if not choices:
-                        await interaction.followup.send("참가할 캐릭터가 없어요. /캐릭터등록으로 먼저 등록해 주세요.", ephemeral=True)
-                        return
-                    await interaction.followup.send("참가시킬 캐릭터를 골라 주세요.",
-                                                    view=CharacterJoinView(game, interaction.user.id, choices), ephemeral=True)
-                    return
-                elif label == "시작" and game.phase == "모집":
+                if label == "시작" and game.phase == "모집":
                     if len(game.players) < 4:
                         await interaction.response.send_message("경찰·의사를 포함해 최소 4캐릭터가 필요해요.", ephemeral=True)
                         return

@@ -52,12 +52,11 @@ class Game:
 
     def start(self) -> None:
         count = len(self.players)
-        mafia_count = max(1, count // 4)
-        roles = random.sample(sorted(MAFIA), min(3, mafia_count))
-        roles += ["마피아"] * (mafia_count - min(3, mafia_count)) + ["경찰", "의사"]
-        civilians = ["탐정", "기자", "군인"]
-        while len(roles) < count:
-            roles.extend(random.sample(civilians, min(len(civilians), count - len(roles))))
+        if not 4 <= count <= 7:
+            raise ValueError("마피아게임은 4~7명으로 진행해요.")
+        mafia_count = 2 if count == 7 else 1
+        roles = random.sample(sorted(MAFIA), mafia_count) + ["경찰", "의사"]
+        roles += random.sample(["탐정", "기자", "군인"], count - len(roles))
         random.shuffle(roles)
         for player, role in zip(self.players.values(), roles):
             player.role = role
@@ -243,13 +242,13 @@ class GameView(discord.ui.View):
                     return
                 if label == "참여" and game.phase == "모집":
                     if player is None:
-                        if len(game.players) >= 20:
-                            await interaction.response.send_message("최대 20명까지 참가할 수 있어요.", ephemeral=True)
+                        if len(game.players) >= 7:
+                            await interaction.response.send_message("최대 7명까지 참가할 수 있어요.", ephemeral=True)
                             return
                         game.players[interaction.user.id] = Player(interaction.user.id, interaction.user.display_name)
                 elif label == "시작" and game.phase == "모집":
-                    if len(game.players) < 6:
-                        await interaction.response.send_message("경찰·의사를 포함해 최소 6명이 필요해요.", ephemeral=True)
+                    if len(game.players) < 4:
+                        await interaction.response.send_message("경찰·의사를 포함해 최소 4명이 필요해요.", ephemeral=True)
                         return
                     game.start()
                 elif label in {"모집 취소", "게임 종료"}:

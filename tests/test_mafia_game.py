@@ -18,14 +18,15 @@ def run(coroutine):
 
 class MafiaTests(unittest.TestCase):
     def test_all_supported_player_counts_have_required_roles(self):
-        for count in range(6, 21):
+        for count in range(4, 8):
             game = fixture([""] * count)
             game.start()
             roles = [p.role for p in game.alive()]
             self.assertEqual(roles.count("경찰"), 1)
             self.assertEqual(roles.count("의사"), 1)
-            self.assertEqual(sum(role in m.MAFIA for role in roles), count // 4)
+            self.assertEqual(sum(role in m.MAFIA for role in roles), 2 if count == 7 else 1)
             self.assertTrue(all(role in m.DESCRIPTIONS for role in roles))
+            self.assertEqual(len(set(roles)), count)
 
     def test_spy_investigation_and_dead_reporter_publication(self):
         game = fixture(["스파이", "경찰", "기자", "의사", "군인", "탐정"])

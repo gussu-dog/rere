@@ -298,18 +298,22 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual([b.label for b in panel.children], ["내 역할 / 결과", "행동", "게임 종료"])
         self.assertNotIn("공격 선택", game.render())
         mafia = [b.label for b in m.CharacterActionView(panel, game.players[1]).children]
-        citizen = [b.label for b in m.CharacterActionView(panel, game.players[2]).children]
-        spy = [b.label for b in m.CharacterActionView(panel, game.players[4]).children]
+        citizen = m.CharacterActionView(panel, game.players[2]).children
+        spy = m.CharacterActionView(panel, game.players[4]).children
         hacker = [b.label for b in m.CharacterActionView(panel, game.players[5]).children]
         self.assertIn("마피아 공격", mafia)
         self.assertIn("팀 대화", mafia)
-        self.assertEqual(citizen, ["밤 행동"])
-        self.assertEqual(spy, ["접선"])
+        self.assertEqual(len(citizen), 1)
+        self.assertIsInstance(citizen[0], m.TargetSelect)
+        self.assertEqual(citizen[0].kind, "action")
+        self.assertEqual(len(spy), 1)
+        self.assertIsInstance(spy[0], m.TargetSelect)
+        self.assertEqual(spy[0].kind, "contact")
         self.assertEqual(hacker, ["밤 행동", "접선"])
         game.players[4].connected_day = 1
         self.assertIn("마피아 공격", [b.label for b in m.CharacterActionView(panel, game.players[4]).children])
         game.phase = "투표"
-        self.assertEqual([b.label for b in m.CharacterActionView(panel, game.players[1]).children], ["투표"])
+        self.assertEqual(m.CharacterActionView(panel, game.players[1]).children[0].kind, "vote")
 
     def test_role_summary_and_action_cards_include_all_owned_characters_privately(self):
         game = fixture(["마피아", "경찰", "의사", "기자"])
@@ -333,7 +337,7 @@ class MafiaTests(unittest.TestCase):
         self.assertTrue(all(call.kwargs["ephemeral"] for call in interaction.followup.send.call_args_list))
         cards = interaction.followup.send.call_args_list
         self.assertIn("마피아 공격", [b.label for b in cards[0].kwargs["view"].children])
-        self.assertNotIn("마피아 공격", [b.label for b in cards[1].kwargs["view"].children])
+        self.assertNotIn("마피아 공격", [getattr(b, "label", None) for b in cards[1].kwargs["view"].children])
         game.revision += 1
         run(cards[0].kwargs["view"].interaction_check(interaction))
         self.assertTrue(interaction.response.send_message.call_args.kwargs["ephemeral"])

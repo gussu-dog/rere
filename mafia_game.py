@@ -731,6 +731,10 @@ class CharacterActionView(MafiaView):
             labels.append(("마피아 공격", "마피아 공격"))
         if game.phase == "밤" and game.team_access(player):
             labels.append(("팀 대화", "팀 대화"))
+        if len(labels) == 1 and labels[0][1] in {"투표", "밤 행동", "접선"}:
+            kind = {"투표": "vote", "밤 행동": "action", "접선": "contact"}[labels[0][1]]
+            self.add_item(TargetSelect(game, player.player_id, kind))
+            return
         for title, action in labels:
             button = discord.ui.Button(label=title)
             button.callback = panel.callback_for(action, player.player_id)
@@ -857,7 +861,7 @@ class GameView(MafiaView):
                     await interaction.response.defer()
                     for member in owned:
                         await interaction.followup.send(
-                            "이 캐릭터는 어떤 행동을 할까요?\n\n" + code_box(role_details(game, member)),
+                            code_box(role_details(game, member)),
                             view=CharacterActionView(self, member), ephemeral=True,
                             allowed_mentions=discord.AllowedMentions.none(),
                         )

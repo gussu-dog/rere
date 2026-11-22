@@ -294,7 +294,7 @@ class Game:
         guides = {
             "모집": "참여 버튼에서 캐릭터를 골라 주세요. 준비되면 모집자가 시작을 눌러 주세요!",
             "밤": "행동 버튼에서 밤 행동을 골라 주세요! 모두 선택하면 아침이 되고, 시간이 끝나면 미선택 대상은 무작위로 정해요.",
-            "토론": "이제 서로 이야기를 나눠 보세요! 3분 뒤 투표를 시작해요. 준비됐다면 모집자가 토론 마치기를 눌러도 좋아요.",
+            "토론": "행동 버튼을 누르면 캐릭터별 비공개 대화 입력창을 열 수 있어요! 3분 뒤 투표를 시작하고, 모집자가 토론 마치기를 누르면 일찍 시작해요.",
             "투표": "행동 버튼에서 캐릭터마다 한 표씩 골라 주세요! 모두 선택하면 진행하고, 시간이 끝나면 미투표는 기권으로 처리해요.",
         }
         message = narration[self.phase] + "\n\n" + code_box("\n".join(lines))
@@ -655,6 +655,47 @@ class TeamChatView(MafiaView):
         await open_team_chat(interaction, self.game, self.actor)
 
 
+def day_speech_allowed(game: Game, owner_id: int, actor: int, day: int, revision: int) -> bool:
+    player = game.players.get(actor)
+    return (sessions.get(game.channel_id) is game and game.phase == "토론"
+            and game.day == day and game.revision == revision
+            and (not game.deadline or time.time() < game.deadline)
+            and player is not None and player.alive and player.owner_id == owner_id)
+
+
+class DayMessageModal(discord.ui.Modal, title="낮 대화에 참여하기"):
+    text = discord.ui.TextInput(label="캐릭터의 대사", style=discord.TextStyle.paragraph, max_length=500)
+
+    def __init__(self, game: Game, actor: int):
+        super().__init__(title=f"{game.players[actor].name[:30]}의 대사", timeout=None)
+        self.game, self.actor = game, actor
+        self.day, self.revision = game.day, game.revision
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        game = self.game
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        async with game.lock:
+            if not day_speech_allowed(game, interaction.user.id, self.actor, self.day, self.revision):
+                await interaction.edit_original_response(content="지금은 이 캐릭터로 낮 대화에 참여할 수 없어요.")
+                return
+            text = self.text.value.strip()
+            if not text:
+                await interaction.edit_original_response(content="캐릭터가 할 말을 적어 주세요.")
+                return
+            await game.message.channel.send(
+                code_box(f"{game.players[self.actor].name}: {text}"),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await interaction.edit_original_response(content="캐릭터의 대사를 전했어요.")
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        print(f"Mafia daytime message failed ({type(error).__name__}).", flush=True)
+        if interaction.response.is_done():
+            await interaction.followup.send("대사 전송 중 오류가 났어요. 채널에 올라왔는지 확인해 주세요.", ephemeral=True)
+        else:
+            await interaction.response.send_message("대사를 보내지 못했어요. 다시 시도해 주세요.", ephemeral=True)
+
+
 def role_details(game: Game, player: Player) -> str:
     details = [player.name, f"역할 · {player.role} · {'생존' if player.alive else '탈락'}",
                "", DESCRIPTIONS[player.role], f"능력 성공률 {game.success_rate(player)}%"]
@@ -675,7 +716,9 @@ class CharacterActionView(MafiaView):
         super().__init__(timeout=None)
         self.panel, self.player_id = panel, player.player_id
         game = panel.game
-        if game.phase == "투표":
+        if game.phase == "토론":
+            labels = [("대화하기", "대화하기")]
+        elif game.phase == "투표":
             labels = [("투표", "투표")]
         elif player.role == "스파이" and not player.connected_day:
             labels = [("접선", "접선")]
@@ -697,7 +740,7 @@ class CharacterActionView(MafiaView):
         game = self.panel.game
         player = game.players.get(self.player_id)
         if (sessions.get(game.channel_id) is game and game.revision == self.panel.revision
-                and game.phase in {"밤", "투표"} and player is not None
+                and game.phase in {"밤", "토론", "투표"} and player is not None
                 and player.alive and player.owner_id == interaction.user.id):
             return True
         await interaction.response.send_message("지금은 이 행동창을 사용할 수 없어요. 새 진행창의 행동 버튼을 눌러 주세요.", ephemeral=True)
@@ -722,7 +765,7 @@ class GameView(MafiaView):
             )
             button.callback = self.callback_for(label)
             if label == "행동":
-                button.disabled = game.phase not in {"밤", "투표"}
+                button.disabled = game.phase not in {"밤", "토론", "투표"}
             elif label == "마피아 공격":
                 button.disabled = game.phase != "밤"
             elif label in {"접선", "팀 대화"}:
@@ -808,7 +851,7 @@ class GameView(MafiaView):
                     return
                 if label == "행동":
                     owned = [p for p in game.alive() if p.owner_id == interaction.user.id]
-                    if not owned or game.phase not in {"밤", "투표"}:
+                    if not owned or game.phase not in {"밤", "토론", "투표"}:
                         await interaction.response.send_message("지금 행동할 수 있는 캐릭터가 없어요.", ephemeral=True)
                         return
                     await interaction.response.defer()
@@ -820,7 +863,7 @@ class GameView(MafiaView):
                         )
                     return
                 player = game.players.get(player_id)
-                personal = {"내 역할 / 결과", "밤 행동", "마피아 공격", "투표", "접선", "팀 대화"}
+                personal = {"내 역할 / 결과", "밤 행동", "마피아 공격", "투표", "접선", "팀 대화", "대화하기"}
                 if label in personal and player_id is None:
                     owned = [p for p in game.players.values() if p.owner_id == interaction.user.id
                              and (label == "내 역할 / 결과" or p.alive)]
@@ -860,6 +903,12 @@ class GameView(MafiaView):
                 elif label == "내 역할 / 결과" and player and game.phase != "모집":
                     text = "이 캐릭터의 역할을 살짝 알려드릴게요!\n\n" + code_box(role_details(game, player))
                     await interaction.response.send_message(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+                    return
+                elif label == "대화하기" and player:
+                    if not day_speech_allowed(game, interaction.user.id, player.player_id, game.day, self.revision):
+                        await interaction.response.send_message("지금은 낮 대화에 참여할 수 없어요.", ephemeral=True)
+                        return
+                    await interaction.response.send_modal(DayMessageModal(game, player.player_id))
                     return
                 elif label in {"밤 행동", "마피아 공격", "투표", "접선"} and player and player.alive:
                     expected = "투표" if label == "투표" else "밤"

@@ -449,6 +449,62 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual(game.attacks, {1: 3, 2: 3})
 
 
+    def test_day_action_cards_open_per_character_modal_and_publish_only_dialogue(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase = "토론"
+        game.players[1].owner_id = game.players[2].owner_id = 99
+        m.sessions[10] = game
+        game.message = S(channel=S(send=AsyncMock()))
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock(), send_modal=AsyncMock()),
+                        followup=S(send=AsyncMock()), edit_original_response=AsyncMock())
+        panel = m.GameView(game)
+        self.assertFalse(next(b for b in panel.children if b.label == "행동").disabled)
+        run(panel.callback_for("행동")(interaction))
+        cards = interaction.followup.send.call_args_list
+        self.assertEqual(len(cards), 2)
+        for call in cards:
+            self.assertTrue(call.kwargs["ephemeral"])
+            self.assertEqual([b.label for b in call.kwargs["view"].children], ["대화하기"])
+        run(cards[1].kwargs["view"].children[0].callback(interaction))
+        modal = interaction.response.send_modal.call_args.args[0]
+        modal.text._value = "저는 어젯밤 P1을 조사했어요."
+        run(modal.on_submit(interaction))
+        output = game.message.channel.send.call_args.args[0]
+        self.assertEqual(output, m.code_box("P2: 저는 어젯밤 P1을 조사했어요."))
+        self.assertNotIn("경찰", output)
+        self.assertNotIn("ephemeral", game.message.channel.send.call_args.kwargs)
+        self.assertIsInstance(game.message.channel.send.call_args.kwargs["allowed_mentions"], m.discord.AllowedMentions)
+
+    def test_day_modal_rejects_wrong_owner_dead_empty_late_and_old_round(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase = "토론"
+        game.players[2].owner_id = 99
+        m.sessions[10] = game
+        game.message = S(channel=S(send=AsyncMock()))
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock()),
+                        edit_original_response=AsyncMock())
+        modal = m.DayMessageModal(game, 2)
+        modal.text._value = " "
+        run(modal.on_submit(interaction))
+        modal.text._value = "말할게요."
+        interaction.user.id = 100
+        run(modal.on_submit(interaction))
+        interaction.user.id = 99
+        game.players[2].alive = False
+        run(modal.on_submit(interaction))
+        game.players[2].alive = True
+        game.phase = "밤"
+        run(modal.on_submit(interaction))
+        game.phase = "토론"
+        game.deadline = 10
+        with patch.object(m.time, "time", return_value=11):
+            run(modal.on_submit(interaction))
+        game.deadline = 0
+        game.revision += 1
+        run(modal.on_submit(interaction))
+        game.message.channel.send.assert_not_awaited()
+
+
 class TimerSchedulingTests(unittest.TestCase):
     def test_new_phase_replaces_timer_and_end_cancels_it(self):
         game = fixture(["마피아", "경찰", "의사", "군인"])

@@ -292,6 +292,72 @@ class MafiaTests(unittest.TestCase):
         self.assertIn(2, game.team_windows)
         live.edit.assert_awaited_once()
 
+    def test_public_panel_has_only_generic_actions_and_private_buttons_match_roles(self):
+        game = fixture(["마피아", "경찰", "의사", "스파이", "해커", "군인"])
+        m.sessions[10] = game
+        panel = m.GameView(game)
+        self.assertEqual([b.label for b in panel.children], ["내 역할 / 결과", "행동", "다음 단계", "게임 종료"])
+        self.assertNotIn("공격 선택", game.render())
+        mafia = [b.label for b in m.CharacterActionView(panel, game.players[1]).children]
+        citizen = [b.label for b in m.CharacterActionView(panel, game.players[2]).children]
+        spy = [b.label for b in m.CharacterActionView(panel, game.players[4]).children]
+        hacker = [b.label for b in m.CharacterActionView(panel, game.players[5]).children]
+        self.assertIn("마피아 공격", mafia)
+        self.assertIn("팀 대화", mafia)
+        self.assertEqual(citizen, ["밤 행동"])
+        self.assertEqual(spy, ["접선"])
+        self.assertEqual(hacker, ["밤 행동", "접선"])
+        game.players[4].connected_day = 1
+        self.assertIn("마피아 공격", [b.label for b in m.CharacterActionView(panel, game.players[4]).children])
+        game.phase = "투표"
+        self.assertEqual([b.label for b in m.CharacterActionView(panel, game.players[1]).children], ["투표"])
+
+    def test_role_summary_and_action_cards_include_all_owned_characters_privately(self):
+        game = fixture(["마피아", "경찰", "의사", "기자"])
+        m.sessions[10] = game
+        game.players[1].owner_id = game.players[2].owner_id = 99
+        game.players[3].owner_id = game.players[4].owner_id = 100
+        panel = m.GameView(game)
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()),
+                        followup=S(send=AsyncMock()))
+        run(panel.callback_for("내 역할 / 결과")(interaction))
+        messages = interaction.followup.send.call_args_list
+        summary = "".join(call.args[0] for call in messages)
+        self.assertIn("P1", summary)
+        self.assertIn("P2", summary)
+        self.assertNotIn("P3", summary)
+        self.assertTrue(all(call.kwargs["ephemeral"] for call in messages))
+        self.assertTrue(all(len(call.args[0]) <= 1900 for call in messages))
+        interaction.followup.send.reset_mock()
+        run(panel.callback_for("행동")(interaction))
+        self.assertEqual(interaction.followup.send.await_count, 2)
+        self.assertTrue(all(call.kwargs["ephemeral"] for call in interaction.followup.send.call_args_list))
+        cards = interaction.followup.send.call_args_list
+        self.assertIn("마피아 공격", [b.label for b in cards[0].kwargs["view"].children])
+        self.assertNotIn("마피아 공격", [b.label for b in cards[1].kwargs["view"].children])
+        game.revision += 1
+        run(cards[0].kwargs["view"].interaction_check(interaction))
+        self.assertTrue(interaction.response.send_message.call_args.kwargs["ephemeral"])
+
+    def test_phase_repost_sends_new_panel_before_deleting_old(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        events = []
+        new = S()
+        deletion = S(delete=AsyncMock(side_effect=lambda: events.append("delete")))
+        channel = S(send=AsyncMock(side_effect=lambda **kwargs: events.append("send") or new),
+                    get_partial_message=lambda message_id: deletion)
+        previous = S(channel=channel, id=22, edit=AsyncMock())
+        game.message = previous
+        run(m.refresh(game, repost=True))
+        self.assertIs(game.message, new)
+        self.assertEqual(events, ["send", "delete"])
+        self.assertIsInstance(channel.send.call_args.kwargs["view"], m.GameView)
+        channel.send = AsyncMock(side_effect=OSError)
+        game.message = previous
+        run(m.refresh(game, repost=True))
+        self.assertIs(game.message, previous)
+        previous.edit.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

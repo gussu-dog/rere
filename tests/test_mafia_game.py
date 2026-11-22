@@ -390,13 +390,13 @@ class MafiaTests(unittest.TestCase):
         clock = [0]
         async def sleep(seconds):
             clock[0] += seconds
-        with patch.object(m.time, "time", side_effect=lambda: clock[0]), patch.object(m.asyncio, "sleep", sleep), patch.object(m, "refresh", AsyncMock()):
+        with patch.object(m.time, "time", side_effect=lambda: clock[0]), patch.object(m.asyncio, "sleep", sleep), patch.object(m, "refresh", AsyncMock()), patch.object(m.random, "choice", side_effect=lambda items: items[0]):
             run(m.phase_clock(game, game.revision))
         self.assertEqual(clock[0], 120)
         self.assertIn("30초", game.message.channel.send.call_args.args[0])
         self.assertEqual(game.phase, "토론")
-        self.assertEqual(game.actions, {1: None, 2: None, 3: None, 4: None})
-        self.assertEqual(game.attacks, {1: None})
+        self.assertEqual(game.actions, {1: None, 2: 1, 3: 1, 4: None})
+        self.assertEqual(game.attacks, {1: 2})
 
     def test_discussion_and_vote_deadlines_and_stale_timer(self):
         game = fixture(["마피아", "경찰", "의사", "군인"])
@@ -416,6 +416,38 @@ class MafiaTests(unittest.TestCase):
         with patch.object(m.asyncio, "sleep", sleep):
             run(m.phase_clock(game, game.revision - 1))
         game.message.channel.send.assert_not_called()
+
+    def test_timeout_randomizes_missing_targets_but_preserves_explicit_skips(self):
+        game = fixture(["마피아", "경찰", "의사", "스파이", "해커", "군인"])
+        game.actions = {2: None}
+        game.attacks = {1: None}
+        with patch.object(m.random, "choice", side_effect=lambda items: items[-1]):
+            game.fill_missing_night_choices()
+        self.assertIsNone(game.actions[2])
+        self.assertIsNone(game.attacks[1])
+        self.assertIsNotNone(game.actions[3])
+        self.assertIsNotNone(game.actions[4])
+        self.assertIsNotNone(game.actions[5])
+        self.assertIn(4, game.contact_attempts)
+        self.assertNotIn(5, game.contact_attempts)
+        self.assertIsNone(game.actions[6])
+        self.assertTrue(game.all_choices_ready())
+        self.assertFalse(game.players[2].inbox)
+        self.assertIn("자동", game.players[3].inbox[-1])
+        counts = {p.player_id: len(p.inbox) for p in game.alive()}
+        game.fill_missing_night_choices()
+        self.assertEqual(counts, {p.player_id: len(p.inbox) for p in game.alive()})
+
+    def test_automatic_attack_excludes_known_allies_and_doctor_can_protect_self(self):
+        game = fixture(["마피아", "스파이", "의사", "경찰"])
+        game.players[2].connected_day = 1
+        self.assertEqual(m.target_candidates(game, 1, "attack"), [3, 4])
+        self.assertIn(3, m.target_candidates(game, 3, "action"))
+        self.assertNotIn(4, m.target_candidates(game, 4, "action"))
+        with patch.object(m.random, "choice", side_effect=lambda items: items[0]):
+            game.fill_missing_night_choices()
+        self.assertEqual(game.attacks, {1: 3, 2: 3})
+
 
 class TimerSchedulingTests(unittest.TestCase):
     def test_new_phase_replaces_timer_and_end_cancels_it(self):

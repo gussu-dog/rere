@@ -120,6 +120,27 @@ class Game:
             if not self.needs_night_action(player):
                 self.actions.setdefault(player.player_id, None)
 
+    def random_night_target(self, player: Player, kind: str) -> int | None:
+        candidates = target_candidates(self, player.player_id, kind)
+        target = random.choice(candidates) if candidates else None
+        name = self.players[target].name if target is not None else "대상 없음"
+        action = {"attack": "공격", "contact": "접선", "action": "능력"}[kind]
+        player.inbox.append(f"{self.day}일 밤 · 시간 초과로 {action} 대상을 자동 선택했어요. {name}")
+        return target
+
+    def fill_missing_night_choices(self) -> None:
+        for player in self.alive():
+            if player.player_id not in self.actions:
+                if self.needs_night_action(player):
+                    kind = "contact" if player.role == "스파이" and not player.connected_day else "action"
+                    self.actions[player.player_id] = self.random_night_target(player, kind)
+                    if kind == "contact":
+                        self.contact_attempts.add(player.player_id)
+                else:
+                    self.actions[player.player_id] = None
+            if self.can_attack(player) and player.player_id not in self.attacks:
+                self.attacks[player.player_id] = self.random_night_target(player, "attack")
+
     def all_choices_ready(self) -> bool:
         if self.phase == "밤":
             return all((not self.needs_night_action(p) or p.player_id in self.actions)
@@ -272,7 +293,7 @@ class Game:
             lines.extend(["", "진행 결과", *events])
         guides = {
             "모집": "참여 버튼에서 캐릭터를 골라 주세요. 준비되면 모집자가 시작을 눌러 주세요!",
-            "밤": "행동 버튼에서 밤 행동을 골라 주세요! 모두 선택하면 아침이 되고, 시간이 끝나면 미선택 행동은 건너뛰어요.",
+            "밤": "행동 버튼에서 밤 행동을 골라 주세요! 모두 선택하면 아침이 되고, 시간이 끝나면 미선택 대상은 무작위로 정해요.",
             "토론": "이제 서로 이야기를 나눠 보세요! 3분 뒤 투표를 시작해요. 준비됐다면 모집자가 토론 마치기를 눌러도 좋아요.",
             "투표": "행동 버튼에서 캐릭터마다 한 표씩 골라 주세요! 모두 선택하면 진행하고, 시간이 끝나면 미투표는 기권으로 처리해요.",
         }
@@ -285,6 +306,13 @@ class Game:
 def code_box(text: str) -> str:
     fence = "```"
     return fence + "text\n" + text.replace("`", "") + "\n" + fence
+
+
+def target_candidates(game: Game, player_id: int, kind: str) -> list[int]:
+    return [p.player_id for p in game.alive()
+            if kind == "vote" or (kind == "action" and game.players[player_id].role == "의사")
+            or (p.player_id != player_id and (kind != "attack" or
+                not (game.team_access(game.players[player_id]) and game.team_access(p))))]
 
 
 def unique_most_voted(values: list[int]) -> int | None:
@@ -361,10 +389,7 @@ async def finish_phase(game: Game, *, expired: bool = False) -> None:
     phase = game.phase
     if phase == "밤":
         if expired:
-            for player in game.alive():
-                game.actions.setdefault(player.player_id, None)
-                if game.can_attack(player):
-                    game.attacks.setdefault(player.player_id, None)
+            game.fill_missing_night_choices()
         game.resolve_night()
     elif phase == "투표":
         if expired:
@@ -411,11 +436,8 @@ class MafiaView(discord.ui.View):
 
 class TargetSelect(discord.ui.Select):
     def __init__(self, game: Game, player_id: int, kind: str):
-        options = [discord.SelectOption(label=p.name[:100], value=str(p.player_id))
-                   for p in game.alive()
-                   if kind == "vote" or (kind == "action" and game.players[player_id].role == "의사")
-                   or (p.player_id != player_id and (kind != "attack" or
-                       not (game.team_access(game.players[player_id]) and game.team_access(p))))]
+        options = [discord.SelectOption(label=game.players[target].name[:100], value=str(target))
+                   for target in target_candidates(game, player_id, kind)]
         options.append(discord.SelectOption(label="사용하지 않기 / 기권", value="skip"))
         super().__init__(placeholder="대상을 골라 주세요", options=options)
         self.game, self.player_id, self.kind = game, player_id, kind

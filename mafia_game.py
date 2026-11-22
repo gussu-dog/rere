@@ -338,10 +338,11 @@ class GameView(MafiaView):
 
     async def open_join_picker(self, interaction: discord.Interaction) -> None:
         game = self.game
-        print("Mafia join: received; sending channel character picker.", flush=True)
+        print("Mafia join: received; sending private character picker.", flush=True)
         await interaction.response.defer()
-        picker_message = await interaction.channel.send(
+        picker_message = await interaction.followup.send(
             "참가할 캐릭터 목록을 불러오고 있어요.",
+            ephemeral=True, wait=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
         print("Mafia join: loading message sent; reading registered characters.", flush=True)
@@ -470,7 +471,7 @@ class GameView(MafiaView):
 def install(bot, registry) -> None:
     global character_registry
     character_registry = registry
-    print("Mafia UI loaded: public-character-picker v3.", flush=True)
+    print("Mafia UI loaded: private-character-picker v4.", flush=True)
 
     async def trace_mafia_button(interaction: discord.Interaction) -> None:
         data = interaction.data or {}

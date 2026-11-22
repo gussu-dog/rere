@@ -151,14 +151,14 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual(len(game.players), 2)
         m.sessions.clear()
 
-    def test_participation_posts_public_picker_and_reports_lookup_errors(self):
+    def test_participation_posts_private_picker_and_reports_lookup_errors(self):
         game = m.Game(10, 99)
         m.sessions[10] = game
         panel = object.__new__(m.GameView)
         panel.game, panel.revision = game, 0
         picker_message = S(edit=AsyncMock())
         interaction = S(user=S(id=99), response=S(defer=AsyncMock()),
-                        channel=S(send=AsyncMock(return_value=picker_message)))
+                        followup=S(send=AsyncMock(return_value=picker_message)))
         async def immediate(awaitable, timeout):
             self.assertFalse(game.lock.locked())
             return await awaitable
@@ -166,6 +166,8 @@ class MafiaTests(unittest.TestCase):
         with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "CharacterJoinView", return_value="picker"), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(return_value=choices))):
             run(panel.callback_for("참여")(interaction))
             self.assertEqual(picker_message.edit.call_args.kwargs["view"], "picker")
+            self.assertTrue(interaction.followup.send.call_args.kwargs["ephemeral"])
+            self.assertTrue(interaction.followup.send.call_args.kwargs["wait"])
             self.assertEqual(len(game.players), 0)
         with patch.object(m.asyncio, "wait_for", immediate), patch.object(m, "character_registry", S(get_character_choices_for_user=AsyncMock(side_effect=TimeoutError))):
             run(panel.callback_for("참여")(interaction))

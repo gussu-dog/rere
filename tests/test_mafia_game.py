@@ -22,6 +22,9 @@ class MafiaTests(unittest.TestCase):
         rolls.start()
         self.addCleanup(rolls.stop)
         self.addCleanup(m.sessions.clear)
+        timers = patch.object(m, "set_phase_timer")
+        timers.start()
+        self.addCleanup(timers.stop)
 
     def test_all_supported_player_counts_have_required_roles(self):
         for count in range(4, 8):
@@ -81,29 +84,25 @@ class MafiaTests(unittest.TestCase):
         m.sessions[10] = game
         game.message = S(edit=AsyncMock())
         interaction = S(user=S(id=1), response=S(defer=AsyncMock(), send_message=AsyncMock()))
-        with patch.object(m.discord.ui.View, "__init__", return_value=None), patch.object(m.GameView, "add_item"):
-            # Pure phase callbacks do not depend on Discord's event loop.
-            view = object.__new__(m.GameView)
-            view.game = game
-            view.revision = 0
+        view = m.GameView(game)
+        with patch.object(m, "refresh", AsyncMock()):
+            run(view.callback_for("다음 단계")(interaction))
+            self.assertEqual(game.phase, "밤")
             for player in game.alive():
                 game.actions[player.player_id] = None
             game.attacks = {1: None}
-            with patch.object(m, "refresh", AsyncMock()):
-                run(view.callback_for("다음 단계")(interaction))
-                self.assertEqual(game.phase, "토론")
-                run(view.callback_for("다음 단계")(interaction))
-                self.assertEqual(game.phase, "토론")
-                view.revision = game.revision
-                run(view.callback_for("다음 단계")(interaction))
-                self.assertEqual(game.phase, "투표")
-                game.votes = {p.player_id: None for p in game.alive()}
-                view.revision = game.revision
-                run(view.callback_for("다음 단계")(interaction))
-                self.assertEqual((game.phase, game.day), ("밤", 2))
-                self.assertFalse(game.actions)
-                self.assertFalse(game.attacks)
-        m.sessions.clear()
+            run(m.advance_if_ready(game))
+            self.assertEqual(game.phase, "토론")
+            run(view.callback_for("토론 마치기")(interaction))
+            self.assertEqual(game.phase, "토론")
+            view = m.GameView(game)
+            run(view.callback_for("토론 마치기")(interaction))
+            self.assertEqual(game.phase, "투표")
+            game.votes = {p.player_id: None for p in game.alive()}
+            run(m.advance_if_ready(game))
+            self.assertEqual((game.phase, game.day), ("밤", 2))
+            self.assertEqual(game.actions, {1: None, 5: None})
+            self.assertFalse(game.attacks)
 
     def test_one_owner_controls_multiple_independent_characters(self):
         game = fixture(["마피아", "경찰", "의사", "기자"])
@@ -296,7 +295,7 @@ class MafiaTests(unittest.TestCase):
         game = fixture(["마피아", "경찰", "의사", "스파이", "해커", "군인"])
         m.sessions[10] = game
         panel = m.GameView(game)
-        self.assertEqual([b.label for b in panel.children], ["내 역할 / 결과", "행동", "다음 단계", "게임 종료"])
+        self.assertEqual([b.label for b in panel.children], ["내 역할 / 결과", "행동", "게임 종료"])
         self.assertNotIn("공격 선택", game.render())
         mafia = [b.label for b in m.CharacterActionView(panel, game.players[1]).children]
         citizen = [b.label for b in m.CharacterActionView(panel, game.players[2]).children]
@@ -357,6 +356,87 @@ class MafiaTests(unittest.TestCase):
         run(m.refresh(game, repost=True))
         self.assertIs(game.message, previous)
         previous.edit.assert_awaited_once()
+
+    def test_last_required_selection_advances_once_and_passive_roles_do_not_wait(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        m.sessions[10] = game
+        for p in game.players.values():
+            p.owner_id = 99
+        game.prepare_night()
+        self.assertEqual(game.actions, {1: None, 4: None})
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()),
+                        edit_original_response=AsyncMock())
+        with patch.object(m, "refresh", AsyncMock()) as refresh:
+            for actor, kind in [(2, "action"), (3, "action")]:
+                select = m.TargetSelect(game, actor, kind)
+                select._values = ["skip"]
+                run(select.callback(interaction))
+                self.assertEqual(game.phase, "밤")
+            select = m.TargetSelect(game, 1, "attack")
+            select._values = ["skip"]
+            run(select.callback(interaction))
+            self.assertEqual(game.phase, "토론")
+            revision = game.revision
+            run(select.callback(interaction))
+            self.assertEqual(game.revision, revision)
+            self.assertTrue(refresh.call_args.kwargs["repost"])
+            self.assertNotIn("토론 마치기", [b.label for b in m.GameView(fixture(["군인"])).children])
+
+    def test_timer_warns_at_thirty_seconds_and_expires_night(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        m.sessions[10] = game
+        game.deadline = 120
+        game.message = S(channel=S(send=AsyncMock()))
+        clock = [0]
+        async def sleep(seconds):
+            clock[0] += seconds
+        with patch.object(m.time, "time", side_effect=lambda: clock[0]), patch.object(m.asyncio, "sleep", sleep), patch.object(m, "refresh", AsyncMock()):
+            run(m.phase_clock(game, game.revision))
+        self.assertEqual(clock[0], 120)
+        self.assertIn("30초", game.message.channel.send.call_args.args[0])
+        self.assertEqual(game.phase, "토론")
+        self.assertEqual(game.actions, {1: None, 2: None, 3: None, 4: None})
+        self.assertEqual(game.attacks, {1: None})
+
+    def test_discussion_and_vote_deadlines_and_stale_timer(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        m.sessions[10] = game
+        game.phase = "토론"
+        with patch.object(m, "refresh", AsyncMock()):
+            run(m.finish_phase(game, expired=True))
+            self.assertEqual(game.phase, "투표")
+            game.votes = {1: 2}
+            run(m.finish_phase(game, expired=True))
+            self.assertFalse(game.players[2].alive)
+            self.assertEqual(game.day, 2)
+        game.message = S(channel=S(send=AsyncMock()))
+        game.deadline = 10
+        async def sleep(_seconds):
+            pass
+        with patch.object(m.asyncio, "sleep", sleep):
+            run(m.phase_clock(game, game.revision - 1))
+        game.message.channel.send.assert_not_called()
+
+class TimerSchedulingTests(unittest.TestCase):
+    def test_new_phase_replaces_timer_and_end_cancels_it(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        previous = S(cancel=unittest.mock.Mock())
+        next_task = S(cancel=unittest.mock.Mock())
+        game.phase_task = previous
+        def create_task(coroutine):
+            coroutine.close()
+            return next_task
+        with patch.object(m.asyncio, "current_task", return_value=None), patch.object(m.asyncio, "create_task", side_effect=create_task) as schedule, patch.object(m.time, "time", return_value=100):
+            m.set_phase_timer(game)
+            previous.cancel.assert_called_once()
+            self.assertEqual(game.deadline, 220)
+            self.assertIs(game.phase_task, next_task)
+            game.phase = "종료"
+            m.set_phase_timer(game)
+            next_task.cancel.assert_called_once()
+            self.assertIsNone(game.phase_task)
+            self.assertEqual(game.deadline, 0)
+            schedule.assert_called_once()
 
 
 if __name__ == "__main__":

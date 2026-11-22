@@ -378,7 +378,10 @@ class CharacterJoinSelect(discord.ui.Select):
                 return
             player_id = max(game.players, default=0) + 1
             game.players[player_id] = Player(player_id, name, owner_id=self.owner_id, character_value=value)
-            await interaction.edit_original_response(content=f"**{discord.utils.escape_markdown(name)}** 참가 완료!", view=None)
+            try:
+                await interaction.delete_original_response()
+            except (discord.HTTPException, OSError) as exc:
+                print(f"Mafia join picker cleanup failed ({type(exc).__name__}).", flush=True)
             await refresh(game)
 
 

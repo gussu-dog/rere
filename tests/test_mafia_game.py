@@ -138,7 +138,7 @@ class MafiaTests(unittest.TestCase):
         m.sessions[10] = game
         choices = [("sheet|하나", "시트 | 하나"), ("sheet|둘", "시트 | 둘")]
         interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()),
-                        edit_original_response=AsyncMock())
+                        edit_original_response=AsyncMock(), delete_original_response=AsyncMock())
         select = m.CharacterJoinSelect(game, 99, choices, 0)
         select.game, select.owner_id, select.choices = game, 99, choices
         outsider = S(user=S(id=100), response=S(send_message=AsyncMock()))
@@ -149,6 +149,7 @@ class MafiaTests(unittest.TestCase):
             for index in (0, 1, 0):
                 select._values = [str(index)]
                 run(select.callback(interaction))
+            self.assertEqual(interaction.delete_original_response.await_count, 2)
             self.assertEqual(len(game.players), 2)
             self.assertEqual({p.owner_id for p in game.players.values()}, {99})
             self.assertEqual(len({p.player_id for p in game.players.values()}), 2)

@@ -154,9 +154,10 @@ class Game:
             "투표": "이제 투표할 시간이에요! 누가 마피아일지 신중하게 골라 주세요!",
             "종료": "마피아게임이 끝났어요! 다들 수고하셨어요!",
         }
-        lines = [f"마피아게임 | {self.day}일째 · {self.phase}", ""]
+        title = "마피아게임 | 모집 중" if self.phase == "모집" else f"마피아게임 | {self.day}일째 · {self.phase}"
+        lines = [title, ""]
         if self.phase == "모집":
-            lines.append(f"참여인원 {len(self.players)}/7 · 최소 4캐릭터")
+            lines.extend([f"참여인원 {len(self.players)}/7", "최소 4명 · 최대 7명"])
         else:
             lines.append(f"생존 {len(self.alive())}/{len(self.players)}")
         for index, player in enumerate(self.players.values(), 1):

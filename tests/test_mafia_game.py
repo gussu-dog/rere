@@ -17,21 +17,28 @@ def run(coroutine):
 
 
 class MafiaTests(unittest.TestCase):
+    def setUp(self):
+        rolls = patch.object(m.random, "randint", return_value=1)
+        rolls.start()
+        self.addCleanup(rolls.stop)
+        self.addCleanup(m.sessions.clear)
+
     def test_all_supported_player_counts_have_required_roles(self):
         for count in range(4, 8):
             game = fixture([""] * count)
             game.start()
             roles = [p.role for p in game.alive()]
+            self.assertEqual(roles.count("마피아"), 1)
             self.assertEqual(roles.count("경찰"), 1)
             self.assertEqual(roles.count("의사"), 1)
-            self.assertEqual(sum(role in m.MAFIA for role in roles), 2 if count == 7 else 1)
+            self.assertEqual(sum(role in m.MAFIA for role in roles), 2 if count >= 6 else 1)
             self.assertTrue(all(role in m.DESCRIPTIONS for role in roles))
             self.assertEqual(len(set(roles)), count)
 
     def test_spy_investigation_and_dead_reporter_publication(self):
-        game = fixture(["스파이", "경찰", "기자", "의사", "군인", "탐정"])
+        game = fixture(["스파이", "경찰", "기자", "의사", "마피아", "탐정"])
         game.actions = {1: None, 2: 1, 3: 1, 4: 4, 5: None, 6: 2}
-        game.attacks = {1: 3}
+        game.attacks = {5: 3}
         game.resolve_night()
         self.assertIn("시민", game.players[2].inbox[-1])
         self.assertFalse(game.players[3].alive)
@@ -40,13 +47,13 @@ class MafiaTests(unittest.TestCase):
         self.assertIn("P1", game.players[6].inbox[-1])
 
     def test_hacker_blocks_protection_and_investigation(self):
-        game = fixture(["해커", "경찰", "의사", "군인", "탐정", "기자"])
+        game = fixture(["해커", "경찰", "의사", "마피아", "탐정", "기자"])
         game.actions = {1: 3, 2: 1, 3: 2}
-        game.attacks = {1: 2}
+        game.attacks = {4: 2}
         game.resolve_night()
         self.assertFalse(game.players[2].alive)
         self.assertIn("방해", game.players[3].inbox[-1])
-        game = fixture(["해커", "경찰", "의사", "군인", "탐정", "기자"])
+        game = fixture(["해커", "경찰", "의사", "마피아", "탐정", "기자"])
         game.actions = {1: 2, 2: 1}
         game.resolve_night()
         self.assertEqual(len(game.players[2].inbox), 1)
@@ -177,6 +184,112 @@ class MafiaTests(unittest.TestCase):
             run(panel.callback_for("참여")(interaction))
             self.assertIn("참가할 캐릭터가 없", picker_message.edit.call_args.kwargs["content"])
         m.sessions.clear()
+
+    def test_skill_rates_and_attack_uses_best_firearm(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        for value, expected in [(0, 30), (20, 42), (50, 60), (80, 78), (100, 90), (150, 90)]:
+            game.players[1].skill_values = {"사격 | 권총": value, "사격 | 라/산": 0}
+            self.assertEqual(game.success_rate(game.players[1], attack=True), expected)
+        game.players[1].skill_values = {"사격 | 권총": 40, "사격 | 라/산": 80}
+        self.assertEqual(game.success_rate(game.players[1], attack=True), 78)
+        game.players[3].skill_values = {"응급처치": 30, "의료": 70}
+        self.assertEqual(game.success_rate(game.players[3]), 72)
+        game.players[2].skill_values = {"과학 | 수사과학": 80, "추적": 20, "관찰력": 50}
+        self.assertEqual(game.success_rate(game.players[2]), 78)
+        with patch.object(m.random, "randint", return_value=79):
+            self.assertFalse(game.check(game.players[2]))
+
+    def test_contact_is_hidden_until_success_and_starts_next_night(self):
+        game = fixture(["마피아", "스파이", "의사", "경찰", "군인", "탐정"])
+        self.assertFalse(game.team_access(game.players[2]))
+        self.assertFalse(game.can_attack(game.players[2]))
+        options = m.TargetSelect(game, 1, "attack").options
+        self.assertIn("2", [o.value for o in options])
+        game.actions = {2: 1}
+        game.contact_attempts = {2}
+        game.resolve_night()
+        self.assertEqual(game.players[2].connected_day, 2)
+        self.assertIn("스파이", game.players[1].inbox[-1])
+        self.assertFalse(game.team_access(game.players[2]))
+        game.day, game.phase = 2, "밤"
+        self.assertTrue(game.team_access(game.players[2]))
+        self.assertTrue(game.can_attack(game.players[2]))
+        self.assertNotIn("2", [o.value for o in m.TargetSelect(game, 1, "attack").options])
+        game.attacks = {1: 3, 2: 4}
+        game.actions.clear()
+        game.resolve_night()
+        self.assertFalse(game.players[3].alive)
+        self.assertFalse(game.players[4].alive)
+
+    def test_hacker_guarantees_only_mafia_roll_and_protection_still_works(self):
+        game = fixture(["마피아", "해커", "의사", "군인", "경찰", "탐정"])
+        game.players[2].connected_day = 1
+        game.attacks = {1: 5}
+        with patch.object(m.random, "randint", return_value=100):
+            game.resolve_night()
+        self.assertFalse(game.players[5].alive)
+        self.assertIn("자동 성공", game.players[1].inbox[-1])
+        game = fixture(["마피아", "해커", "의사", "군인", "경찰", "탐정"])
+        game.players[2].connected_day = 1
+        game.actions = {3: 5}
+        game.attacks = {1: 5}
+        game.resolve_night()
+        self.assertTrue(game.players[5].alive)
+
+    def test_team_chat_private_access_modal_broadcast_and_morning_closure(self):
+        game = fixture(["마피아", "스파이", "해커", "경찰", "의사", "군인"])
+        m.sessions[10] = game
+        for player in game.players.values():
+            player.owner_id = player.player_id + 100
+        game.players[2].connected_day = 1
+        windows = [S(edit=AsyncMock()) for _ in range(2)]
+        def interaction(actor, window):
+            return S(user=S(id=game.players[actor].owner_id),
+                     response=S(defer=AsyncMock(), send_message=AsyncMock(), send_modal=AsyncMock()),
+                     followup=S(send=AsyncMock(return_value=window)),
+                     edit_original_response=AsyncMock())
+        first, second = interaction(1, windows[0]), interaction(2, windows[1])
+        panel = m.GameView(game)
+        run(panel.callback_for("팀 대화", 1)(first))
+        run(m.open_team_chat(second, game, 2))
+        self.assertTrue(first.followup.send.call_args.kwargs["ephemeral"])
+        self.assertEqual(len(game.team_windows), 2)
+        outsider = interaction(3, S(edit=AsyncMock()))
+        run(m.open_team_chat(outsider, game, 3))
+        self.assertEqual(len(game.team_windows), 2)
+        self.assertNotIn("view", outsider.followup.send.call_args.kwargs)
+        chat_view = first.followup.send.call_args.kwargs["view"]
+        run(chat_view.write.callback(first))
+        modal = first.response.send_modal.call_args.args[0]
+        modal.text._value = "이번에는 P4를 노릴게."
+        run(modal.on_submit(first))
+        for window in windows:
+            text = window.edit.call_args.kwargs["content"]
+            self.assertIn("P1", text)
+            self.assertIn("P4", text)
+        self.assertEqual(game.team_messages[1], [(1, "이번에는 P4를 노릴게.")])
+        run(modal.on_submit(outsider))
+        self.assertEqual(len(game.team_messages[1]), 1)
+        game.phase = "토론"
+        run(m.update_team_windows(game))
+        self.assertFalse(game.team_windows)
+        self.assertTrue(all(window.edit.call_args.kwargs["view"] is None for window in windows))
+        run(modal.on_submit(first))
+        self.assertEqual(len(game.team_messages[1]), 1)
+        game.phase, game.day = "밤", 2
+        self.assertFalse(m.chat_allowed(game, first.user.id, 1, 1))
+
+    def test_expired_chat_window_does_not_stop_other_updates(self):
+        game = fixture(["마피아", "스파이", "경찰", "의사"])
+        m.sessions[10] = game
+        game.players[2].connected_day = 1
+        stale = S(edit=AsyncMock(side_effect=OSError))
+        live = S(edit=AsyncMock())
+        game.team_windows = {1: (1, stale), 2: (1, live)}
+        run(m.update_team_windows(game))
+        self.assertNotIn(1, game.team_windows)
+        self.assertIn(2, game.team_windows)
+        live.edit.assert_awaited_once()
 
 
 if __name__ == "__main__":

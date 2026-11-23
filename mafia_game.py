@@ -1343,7 +1343,7 @@ async def announce_discussion(interaction: discord.Interaction, game: Game, text
                 view.remove_item(item)
         options["view"] = view
     try:
-        await interaction.followup.send(text, **options)
+        await interaction.channel.send(text, **options)
     except (discord.HTTPException, OSError) as exc:
         print(f"Mafia discussion announcement failed ({type(exc).__name__}).", flush=True)
 

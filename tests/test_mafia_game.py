@@ -1018,15 +1018,16 @@ class DiscussionAnnouncementTests(unittest.TestCase):
         game.phase = "토론"
         game.discussion_round = 2
         game.discussion_votes = {1: True}
-        interaction = S(followup=S(send=AsyncMock()))
+        interaction = S(channel=S(send=AsyncMock()), followup=S(send=AsyncMock()))
         run(m.announce_discussion(interaction, game, "토론 연장 신청"))
-        options = interaction.followup.send.call_args.kwargs
+        options = interaction.channel.send.call_args.kwargs
         self.assertFalse(options.get("ephemeral", False))
+        interaction.followup.send.assert_not_awaited()
         self.assertEqual([b.label for b in options["view"].children], ["찬성", "반대"])
         self.assertEqual(options["view"].discussion_round, 2)
         game.discussion_votes = None
         run(m.announce_discussion(interaction, game, "반대로 유지"))
-        self.assertNotIn("view", interaction.followup.send.call_args.kwargs)
+        self.assertNotIn("view", interaction.channel.send.call_args.kwargs)
 
 
 class TimerSchedulingTests(unittest.TestCase):

@@ -95,13 +95,16 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual(game.phase, "토론")
             run(view.callback_for("토론 마치기")(interaction))
             self.assertEqual(game.phase, "토론")
+            game.players[1].owner_id = game.players[2].owner_id = 1
+            for player in game.alive():
+                player.owner_id = 1
             view = m.GameView(game)
-            run(view.callback_for("토론 마치기")(interaction))
+            run(view.callback_for("토론 단축")(interaction))
             self.assertEqual(game.phase, "투표")
             game.votes = {p.player_id: None for p in game.alive()}
             run(m.advance_if_ready(game))
             self.assertEqual((game.phase, game.day), ("밤", 2))
-            self.assertEqual(game.actions, {1: None, 5: None})
+            self.assertEqual(game.actions, {1: None})
             self.assertFalse(game.attacks)
 
     def test_one_owner_controls_multiple_independent_characters(self):
@@ -300,7 +303,7 @@ class MafiaTests(unittest.TestCase):
         mafia = [b.label for b in m.CharacterActionView(panel, game.players[1]).children]
         citizen = m.CharacterActionView(panel, game.players[2]).children
         spy = m.CharacterActionView(panel, game.players[4]).children
-        hacker = [b.label for b in m.CharacterActionView(panel, game.players[5]).children]
+        hacker = m.CharacterActionView(panel, game.players[5]).children
         self.assertIn("마피아 공격", mafia)
         self.assertIn("팀 대화", mafia)
         self.assertEqual(len(citizen), 1)
@@ -309,7 +312,8 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual(len(spy), 1)
         self.assertIsInstance(spy[0], m.TargetSelect)
         self.assertEqual(spy[0].kind, "contact")
-        self.assertEqual(hacker, ["밤 행동", "접선"])
+        self.assertEqual(len(hacker), 1)
+        self.assertEqual(hacker[0].kind, "action")
         game.players[4].connected_day = 1
         self.assertIn("마피아 공격", [b.label for b in m.CharacterActionView(panel, game.players[4]).children])
         game.phase = "투표"
@@ -367,11 +371,11 @@ class MafiaTests(unittest.TestCase):
         for p in game.players.values():
             p.owner_id = 99
         game.prepare_night()
-        self.assertEqual(game.actions, {1: None, 4: None})
+        self.assertEqual(game.actions, {1: None})
         interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()),
                         edit_original_response=AsyncMock(), followup=S(send=AsyncMock()))
         with patch.object(m, "refresh", AsyncMock()) as refresh:
-            for actor, kind in [(2, "action"), (3, "action")]:
+            for actor, kind in [(2, "action"), (3, "action"), (4, "action")]:
                 select = m.TargetSelect(game, actor, kind)
                 select._values = ["skip"]
                 run(select.callback(interaction))
@@ -399,7 +403,7 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual(clock[0], 120)
         self.assertIn("30초", game.message.channel.send.call_args.args[0])
         self.assertEqual(game.phase, "토론")
-        self.assertEqual(game.actions, {1: None, 2: 1, 3: 1, 4: None})
+        self.assertEqual(game.actions, {1: None, 2: 1, 3: 1, 4: 1})
         self.assertEqual(game.attacks, {1: 2})
 
     def test_discussion_and_vote_deadlines_and_stale_timer(self):
@@ -434,7 +438,7 @@ class MafiaTests(unittest.TestCase):
         self.assertIsNotNone(game.actions[5])
         self.assertIn(4, game.contact_attempts)
         self.assertNotIn(5, game.contact_attempts)
-        self.assertIsNone(game.actions[6])
+        self.assertIsNotNone(game.actions[6])
         self.assertTrue(game.all_choices_ready())
         self.assertFalse(game.players[2].inbox)
         self.assertIn("자동", game.players[3].inbox[-1])
@@ -467,14 +471,14 @@ class MafiaTests(unittest.TestCase):
         self.assertFalse(hasattr(m, "DayMessageModal"))
         with patch.object(m, "refresh", AsyncMock()), patch.object(m.time, "time", return_value=100):
             run(panel.callback_for("토론 연장")(interaction(99)))
-            self.assertEqual(game.extension_votes, {99: True})
+            self.assertEqual(game.discussion_votes, {99: True})
             self.assertEqual(game.deadline, 1000)
             vote_panel = m.GameView(game)
-            run(vote_panel.callback_for("연장 찬성")(interaction(100)))
-            self.assertIsNone(game.extension_votes)
-            self.assertEqual(game.deadline, 1060)
-            self.assertEqual(game.extension_seconds, 60)
-            m.set_phase_timer.assert_called_once_with(game, deadline=1060)
+            run(vote_panel.callback_for("찬성")(interaction(100)))
+            self.assertIsNone(game.discussion_votes)
+            self.assertEqual(game.deadline, 1300)
+            self.assertEqual(game.extension_seconds, 300)
+            m.set_phase_timer.assert_called_once_with(game, deadline=1300)
             self.assertIn("전원 찬성", game.render())
 
     def test_extension_veto_stale_poll_and_spectator(self):
@@ -488,18 +492,18 @@ class MafiaTests(unittest.TestCase):
         with patch.object(m, "refresh", AsyncMock()), patch.object(m.time, "time", return_value=100):
             outsider = interaction(99)
             run(m.GameView(game).callback_for("토론 연장")(outsider))
-            self.assertIsNone(game.extension_votes)
+            self.assertIsNone(game.discussion_votes)
             run(m.GameView(game).callback_for("토론 연장")(interaction(1)))
             first_poll = m.GameView(game)
-            run(first_poll.callback_for("연장 반대")(interaction(2)))
-            self.assertIsNone(game.extension_votes)
+            run(first_poll.callback_for("반대")(interaction(2)))
+            self.assertIsNone(game.discussion_votes)
             self.assertEqual(game.deadline, 1000)
             run(m.GameView(game).callback_for("토론 연장")(interaction(1)))
-            run(first_poll.callback_for("연장 찬성")(interaction(2)))
-            self.assertEqual(game.extension_votes, {1: True})
+            run(first_poll.callback_for("찬성")(interaction(2)))
+            self.assertEqual(game.discussion_votes, {1: True})
             run(m.finish_phase(game))
             self.assertEqual(game.phase, "투표")
-            self.assertIsNone(game.extension_votes)
+            self.assertIsNone(game.discussion_votes)
 
 
     def test_night_results_are_grouped_by_owner_and_only_include_current_night(self):
@@ -554,6 +558,62 @@ class MafiaTests(unittest.TestCase):
         self.assertNotIn(m.DESCRIPTIONS["경찰"], details)
         self.assertNotIn("새로운 조사 결과", details)
         self.assertIn("새로운 조사 결과", m.role_details(game, game.players[2]))
+
+    def test_hacker_selecting_mafia_automatically_contacts_without_blocking(self):
+        game = fixture(["마피아", "해커", "경찰", "의사", "군인", "탐정"])
+        game.actions = {2: 1}
+        game.attacks = {1: 3}
+        game.resolve_night()
+        self.assertIn(2, game.contact_attempts)
+        self.assertEqual(game.players[2].connected_day, 2)
+        self.assertFalse(game.players[3].alive)
+        self.assertFalse(any("방해" in item for item in game.players[1].inbox))
+        self.assertTrue(any("접선" in item for item in game.players[1].inbox))
+        failed = fixture(["마피아", "해커", "경찰", "의사", "군인", "탐정"])
+        failed.actions = {2: 1}
+        with patch.object(m.random, "randint", return_value=100):
+            failed.resolve_night()
+        self.assertEqual(failed.players[2].connected_day, 0)
+        self.assertFalse(any("방해" in item for item in failed.players[1].inbox))
+
+    def test_soldier_intercepts_once_and_failed_health_kills_soldier_not_target(self):
+        game = fixture(["마피아", "군인", "경찰", "스파이", "의사", "탐정"])
+        self.assertTrue(game.needs_night_action(game.players[2]))
+        game.players[4].connected_day = 1
+        game.actions = {2: 3}
+        game.attacks = {1: 3, 4: 3}
+        game.resolve_night()
+        self.assertTrue(game.players[2].alive)
+        self.assertTrue(game.players[2].used)
+        self.assertFalse(game.players[3].alive)
+        self.assertFalse(game.needs_night_action(game.players[2]))
+        failed = fixture(["마피아", "군인", "경찰", "의사", "탐정", "기자"])
+        failed.actions = {2: 3}
+        failed.attacks = {1: 3}
+        with patch.object(m.random, "randint", side_effect=[1, 100]):
+            failed.resolve_night()
+        self.assertFalse(failed.players[2].alive)
+        self.assertTrue(failed.players[3].alive)
+        self.assertIn("탈락", failed.players[2].inbox[-1])
+
+    def test_shortening_discussion_requires_every_owner_and_veto_preserves_time(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase, game.deadline = "토론", 1000
+        game.players[1].owner_id = game.players[2].owner_id = 99
+        game.players[3].owner_id = game.players[4].owner_id = 100
+        m.sessions[10] = game
+        def interaction(owner):
+            return S(user=S(id=owner), response=S(defer=AsyncMock(), send_message=AsyncMock()))
+        with patch.object(m.time, "time", return_value=100), patch.object(m, "refresh", AsyncMock()):
+            run(m.GameView(game).callback_for("토론 단축")(interaction(99)))
+            self.assertEqual(game.phase, "토론")
+            run(m.GameView(game).callback_for("반대")(interaction(100)))
+            self.assertEqual(game.phase, "토론")
+            self.assertEqual(game.deadline, 1000)
+            run(m.GameView(game).callback_for("토론 단축")(interaction(99)))
+            run(m.GameView(game).callback_for("찬성")(interaction(100)))
+            self.assertEqual(game.phase, "투표")
+        self.assertEqual(m.PHASE_SECONDS["토론"], 600)
 
 
 class TimerSchedulingTests(unittest.TestCase):

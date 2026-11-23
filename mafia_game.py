@@ -11,16 +11,16 @@ import discord
 from discord import app_commands
 
 MAFIA = {"마피아", "스파이", "해커"}
-PHASE_SECONDS = {"밤": 120, "토론": 180, "투표": 60}
+PHASE_SECONDS = {"밤": 120, "토론": 600, "투표": 60}
 DESCRIPTIONS = {
     "마피아": "매일 밤 사격으로 한 명을 공격해요. 접선한 해커가 살아 있으면 공격 판정이 자동 성공해요.",
     "스파이": "경찰에게 시민으로 보여요. 밤 행동으로 한 명에게 접선을 시도해요. 성공한 대상이 마피아면 다음 밤부터 별도 공격과 팀 대화가 가능해요.",
-    "해커": "밤 행동으로 접선을 시도하거나 한 명의 능력을 방해해요. 접선 성공 다음 밤부터 살아 있는 동안 마피아의 공격 판정을 자동 성공시켜요.",
+    "해커": "한 명을 골라요. 마피아면 접선을 시도하고, 그 외에는 능력을 방해해요. 접선 성공 다음 밤부터 마피아의 공격 판정을 자동 성공시켜요.",
     "경찰": "추적·수사과학·관찰력 중 가장 높은 수치로 진영을 조사해요. 스파이는 시민으로 보여요.",
     "의사": "응급처치·의료·의학 중 가장 높은 수치로 한 명을 보호해요. 자신도 선택할 수 있어요.",
     "탐정": "추적·수사과학·관찰력 중 가장 높은 수치로 대상의 밤 행동 대상을 알아내요.",
     "기자": "자료조사로 정확한 역할을 취재해 다음 아침 공개해요. 성공은 게임 중 한 번이고 실패하면 다시 시도할 수 있어요.",
-    "군인": "밤 공격에 명중당하면 건강으로 버티기를 판정해요. 성공은 게임 중 한 번 가능해요.",
+    "군인": "선택한 상대에게 들어온 공격을 한 번 대신 맞아요. 건강 기반 판정에 성공하면 버티고, 실패하면 대신 탈락해요.",
 }
 ROLE_SKILLS = {
     "마피아": {"사격"}, "스파이": {"은밀행동"}, "해커": {"자료조사"},
@@ -65,10 +65,11 @@ class Game:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     deadline: float = 0
     phase_task: asyncio.Task | None = None
-    extension_votes: dict[int, bool] | None = None
-    extension_round: int = 0
+    discussion_votes: dict[int, bool] | None = None
+    discussion_round: int = 0
     extension_seconds: int = 0
     extension_notice: str = ""
+    discussion_proposal: str = ""
     private_recipients: dict[int, discord.Interaction] = field(default_factory=dict)
     night_inbox_offsets: dict[int, int] = field(default_factory=dict)
 
@@ -119,7 +120,8 @@ class Game:
     def needs_night_action(self, player: Player) -> bool:
         return (player.role in {"경찰", "의사", "탐정", "해커"}
                 or player.role == "기자" and not player.used
-                or player.role == "스파이" and not player.connected_day)
+                or player.role == "스파이" and not player.connected_day
+                or player.role == "군인" and not player.used)
 
     def prepare_night(self) -> None:
         self.night_inbox_offsets = {p.player_id: len(p.inbox) for p in self.alive()}
@@ -175,16 +177,25 @@ class Game:
     def resolve_night(self) -> None:
         active = {p.player_id for p in self.alive()}
         actions = {uid: target for uid, target in self.actions.items() if uid in active}
+        for uid, target in actions.items():
+            if self.players[uid].role == "해커":
+                self.contact_attempts.discard(uid)
+                if target is not None and self.players[target].role == "마피아" and not self.players[uid].connected_day:
+                    self.contact_attempts.add(uid)
         blocked = {target for uid, target in actions.items()
                    if self.players[uid].role == "해커" and uid not in self.contact_attempts
-                   and target is not None and self.check(self.players[uid])}
+                   and target is not None and self.players[target].role != "마피아"
+                   and self.check(self.players[uid])}
+        guards = {uid: target for uid, target in actions.items()
+                  if self.players[uid].role == "군인" and not self.players[uid].used
+                  and uid not in blocked and target is not None}
         for uid in blocked:
             self.players[uid].inbox.append(f"{self.day}일 밤 · 누군가의 방해로 능력을 사용하지 못했어요.")
         protected = set()
         articles = []
         for uid, target in actions.items():
             player = self.players[uid]
-            if uid in blocked or target is None or player.role == "해커" and uid not in self.contact_attempts:
+            if uid in blocked or target is None or player.role == "군인" or player.role == "해커" and uid not in self.contact_attempts:
                 continue
             subject = self.players[target]
             if player.role == "기자" and player.used:
@@ -227,6 +238,19 @@ class Game:
                 continue
             if victim in protected:
                 attacker.inbox.append(f"{self.day}일 밤 · {self.players[victim].name} 공격이 보호에 막혔어요.")
+                continue
+            guard = next((uid for uid, guarded in guards.items()
+                          if guarded == victim and uid != victim and uid not in dead and not self.players[uid].used), None)
+            if guard is not None:
+                soldier = self.players[guard]
+                soldier.used = True
+                self.players[victim].inbox.append(f"{self.day}일 밤 · {soldier.name}가 공격을 대신 맞아주었어요.")
+                attacker.inbox.append(f"{self.day}일 밤 · {soldier.name}가 {self.players[victim].name}의 공격을 대신 맞았어요.")
+                if guard in protected or self.check(soldier):
+                    soldier.inbox.append(f"{self.day}일 밤 · {self.players[victim].name}를 지키고 공격을 버텼어요.")
+                else:
+                    dead.add(guard)
+                    soldier.inbox.append(f"{self.day}일 밤 · {self.players[victim].name}를 지키다가 탈락했어요.")
                 continue
             player = self.players[victim]
             if player.role == "군인" and not player.used and self.check(player):
@@ -310,7 +334,7 @@ class Game:
         guides = {
             "모집": "참여 버튼에서 캐릭터를 골라 주세요. 준비되면 모집자가 시작을 눌러 주세요!",
             "밤": "행동 버튼에서 밤 행동을 골라 주세요! 모두 선택하면 아침이 되고, 시간이 끝나면 미선택 대상은 무작위로 정해요.",
-            "토론": "채팅으로 자유롭게 이야기를 나눠 주세요! 시간이 부족하면 토론 연장을 요청할 수 있어요.",
+            "토론": "채팅으로 10분 동안 이야기를 나눠 주세요! 전원 찬성하면 5분 연장하거나 바로 투표를 시작할 수 있어요.",
             "투표": "행동 버튼에서 캐릭터마다 한 표씩 골라 주세요! 모두 선택하면 진행하고, 시간이 끝나면 미투표는 기권으로 처리해요.",
         }
         message = narration[self.phase] + "\n\n" + code_box("\n".join(lines))
@@ -458,7 +482,8 @@ async def finish_phase(game: Game, *, expired: bool = False) -> None:
         return
     if expired:
         game.news.insert(0, f"{phase} 제한시간이 끝났어요!")
-    game.extension_votes = None
+    game.discussion_votes = None
+    game.discussion_proposal = ""
     game.extension_seconds = 0
     game.extension_notice = ""
     set_phase_timer(game)
@@ -742,10 +767,8 @@ class CharacterActionView(MafiaView):
         elif player.role == "스파이" and not player.connected_day:
             labels = [("접선", "접선")]
         else:
-            passive = player.role in {"마피아", "군인", "스파이"} or player.role == "기자" and player.used
+            passive = not game.needs_night_action(player)
             labels = [] if passive else [("밤 행동", "밤 행동")]
-            if player.role == "해커" and not player.connected_day:
-                labels.append(("접선", "접선"))
         if game.phase == "밤" and game.can_attack(player):
             labels.append(("마피아 공격", "마피아 공격"))
         if game.phase == "밤" and game.team_access(player):
@@ -775,20 +798,20 @@ class GameView(MafiaView):
         super().__init__(timeout=None)
         self.game = game
         self.revision = game.revision
-        self.extension_round = game.extension_round
+        self.discussion_round = game.discussion_round
         labels = ["참여", "시작", "모집 취소"] if game.phase == "모집" else [
             "내 역할 / 결과", "행동", "게임 종료"]
         if game.phase == "토론":
-            labels.insert(2, "토론 마치기")
+            labels.insert(2, "토론 단축")
             labels.insert(3, "토론 연장")
-            if game.extension_votes is not None:
-                labels.extend(["연장 찬성", "연장 반대"])
+            if game.discussion_votes is not None:
+                labels.extend(["찬성", "반대"])
         if game.phase == "종료":
             labels = []
         for label in labels:
             button = discord.ui.Button(
                 label=label, row=0 if len(self.children) < 4 else 1,
-                custom_id=f"mafia:{game.channel_id}:{game.revision}:{game.extension_round}:{label}",
+                custom_id=f"mafia:{game.channel_id}:{game.revision}:{game.discussion_round}:{label}",
             )
             button.callback = self.callback_for(label)
             if label == "행동":
@@ -905,42 +928,46 @@ class GameView(MafiaView):
                 if label in personal and (player is None or player.owner_id != interaction.user.id):
                     await interaction.response.send_message("본인이 참가시킨 캐릭터만 조종할 수 있어요.", ephemeral=True)
                     return
-                if label in {"시작", "모집 취소", "다음 단계", "토론 마치기", "게임 종료"} and interaction.user.id != game.owner_id:
+                if label in {"시작", "모집 취소", "게임 종료"} and interaction.user.id != game.owner_id:
                     await interaction.response.send_message("모집한 사람만 진행할 수 있어요.", ephemeral=True)
                     return
-                if label in {"토론 연장", "연장 찬성", "연장 반대"}:
+                if label in {"토론 연장", "토론 단축", "찬성", "반대"}:
                     voters = {p.owner_id for p in game.alive()}
-                    if (game.phase != "토론" or interaction.user.id not in voters
-                            or game.deadline and time.time() >= game.deadline):
-                        await interaction.response.send_message("토론 시간 안에 생존 캐릭터를 맡은 참가자만 연장에 참여할 수 있어요.", ephemeral=True)
+                    if game.phase != "토론" or interaction.user.id not in voters:
+                        await interaction.response.send_message("생존 캐릭터를 맡은 참가자만 토론 시간 투표에 참여할 수 있어요.", ephemeral=True)
                         return
                     if game.deadline and time.time() >= game.deadline:
                         await interaction.response.defer()
                         await finish_phase(game, expired=True)
                         return
-                    if label == "토론 연장":
-                        if game.extension_votes is not None:
-                            await interaction.response.send_message("이미 토론 연장에 대한 의견을 모으고 있어요.", ephemeral=True)
+                    if label in {"토론 연장", "토론 단축"}:
+                        if game.discussion_votes is not None:
+                            await interaction.response.send_message("이미 토론 시간에 대한 의견을 모으고 있어요.", ephemeral=True)
                             return
-                        game.extension_round += 1
-                        game.extension_votes = {interaction.user.id: True}
+                        game.discussion_round += 1
+                        game.discussion_proposal = label
+                        game.discussion_votes = {interaction.user.id: True}
                     else:
-                        if game.extension_votes is None or self.extension_round != game.extension_round:
-                            await interaction.response.send_message("이미 종료된 연장 투표예요. 새 진행창을 확인해 주세요.", ephemeral=True)
+                        if game.discussion_votes is None or self.discussion_round != game.discussion_round:
+                            await interaction.response.send_message("이미 종료된 시간 투표예요. 새 진행창을 확인해 주세요.", ephemeral=True)
                             return
-                        game.extension_votes[interaction.user.id] = label == "연장 찬성"
-                    if not all(game.extension_votes.values()):
-                        game.extension_votes = None
-                        game.extension_notice = "반대 의견이 있어 토론을 연장하지 않았어요."
-                    elif voters <= game.extension_votes.keys():
-                        game.extension_votes = None
-                        game.extension_seconds += 60
+                        game.discussion_votes[interaction.user.id] = label == "찬성"
+                    if not all(game.discussion_votes.values()):
+                        game.discussion_votes = None
+                        game.extension_notice = "반대 의견이 있어 토론 시간을 유지해요."
+                    elif voters <= game.discussion_votes.keys():
+                        game.discussion_votes = None
+                        if game.discussion_proposal == "토론 단축":
+                            await interaction.response.defer()
+                            await finish_phase(game)
+                            return
+                        game.extension_seconds += 300
                         deadline = game.deadline or time.time() + PHASE_SECONDS["토론"]
-                        game.deadline = deadline + 60
+                        game.deadline = deadline + 300
                         set_phase_timer(game, deadline=game.deadline)
-                        game.extension_notice = "전원 찬성으로 토론을 1분 연장했어요!"
+                        game.extension_notice = "전원 찬성으로 토론을 5분 연장했어요!"
                     else:
-                        game.extension_notice = f"토론 연장 요청 · 찬성 {len(game.extension_votes)}/{len(voters)}명"
+                        game.extension_notice = f"{game.discussion_proposal} 요청 · 찬성 {len(game.discussion_votes)}/{len(voters)}명"
                     await interaction.response.defer()
                     await refresh(game)
                     return
@@ -984,7 +1011,7 @@ class GameView(MafiaView):
                         label_kind = "contact"
                     else:
                         label_kind = "action"
-                    if label == "밤 행동" and (player.role in {"군인", "마피아"} or player.role == "스파이" and player.connected_day or player.role == "기자" and player.used):
+                    if label == "밤 행동" and not game.needs_night_action(player):
                         game.actions[player.player_id] = None
                         game.contact_attempts.discard(player.player_id)
                         await interaction.response.send_message("오늘 밤은 별도 능력 없이 기다려요. 마피아 진영은 공격도 선택해 주세요.", ephemeral=True)
@@ -996,11 +1023,7 @@ class GameView(MafiaView):
                                                             view=TargetView(game, player.player_id, kind), ephemeral=True)
                     return
                 elif label in {"다음 단계", "토론 마치기"}:
-                    if game.phase != "토론":
-                        await interaction.response.send_message("밤 행동과 투표는 모두 선택하면 자동으로 넘어가요.", ephemeral=True)
-                        return
-                    await interaction.response.defer()
-                    await finish_phase(game)
+                    await interaction.response.send_message("토론은 전원 찬성으로 단축할 수 있어요. 토론 단축 버튼을 눌러 주세요.", ephemeral=True)
                     return
                 else:
                     await interaction.response.send_message("게임 참가자와 생존 여부를 확인해 주세요.", ephemeral=True)

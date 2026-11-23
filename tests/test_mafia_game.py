@@ -228,7 +228,7 @@ class MafiaTests(unittest.TestCase):
         with patch.object(m.random, "randint", return_value=100):
             game.resolve_night()
         self.assertFalse(game.players[5].alive)
-        self.assertIn("자동 성공", game.players[1].inbox[-1])
+        self.assertTrue(any("자동 성공" in item for item in game.players[1].inbox))
         game = fixture(["마피아", "해커", "의사", "군인", "경찰", "탐정"])
         game.players[2].connected_day = 1
         game.actions = {3: 5}
@@ -369,7 +369,7 @@ class MafiaTests(unittest.TestCase):
         game.prepare_night()
         self.assertEqual(game.actions, {1: None, 4: None})
         interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()),
-                        edit_original_response=AsyncMock())
+                        edit_original_response=AsyncMock(), followup=S(send=AsyncMock()))
         with patch.object(m, "refresh", AsyncMock()) as refresh:
             for actor, kind in [(2, "action"), (3, "action")]:
                 select = m.TargetSelect(game, actor, kind)
@@ -501,6 +501,59 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual(game.phase, "투표")
             self.assertIsNone(game.extension_votes)
 
+
+    def test_night_results_are_grouped_by_owner_and_only_include_current_night(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.players[1].owner_id = game.players[2].owner_id = 99
+        game.players[3].owner_id = game.players[4].owner_id = 100
+        for p in game.alive():
+            p.inbox.append("지난 밤에 있었던 일")
+        game.prepare_night()
+        first, second = S(followup=S(send=AsyncMock())), S(followup=S(send=AsyncMock()))
+        game.private_recipients = {99: first, 100: second}
+        game.actions = {1: None, 2: 1, 3: 3, 4: None}
+        game.attacks = {1: 3}
+        game.resolve_night()
+        run(m.send_night_results(game))
+        text = "".join(call.args[0] for call in first.followup.send.call_args_list)
+        self.assertIn("P1", text)
+        self.assertIn("P2", text)
+        self.assertIn("능력 대상", text)
+        self.assertNotIn("지난 밤", text)
+        self.assertNotIn("P4", text)
+        self.assertIn("보호에 막혔", text)
+        self.assertTrue(all(call.kwargs["ephemeral"] for call in first.followup.send.call_args_list))
+        self.assertTrue(all(len(call.args[0]) <= 1900 for call in first.followup.send.call_args_list))
+        own_text = "".join(call.args[0] for call in second.followup.send.call_args_list)
+        self.assertIn("P4", own_text)
+        self.assertNotIn("조사 결과", own_text)
+
+    def test_expired_private_notification_does_not_block_other_players(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.prepare_night()
+        for index, p in game.players.items():
+            p.owner_id = index
+        bad = S(followup=S(send=AsyncMock(side_effect=OSError)))
+        good = S(followup=S(send=AsyncMock()))
+        game.private_recipients = {1: bad, 2: good}
+        run(m.send_night_results(game))
+        good.followup.send.assert_awaited_once()
+
+    def test_role_guide_command_and_compact_character_cards(self):
+        import main
+        command = main.bot.tree.get_command("마피아게임")
+        self.assertEqual([choice.name for choice in command.parameters[0].choices], ["모집", "직업설명"])
+        interaction = S(response=S(send_message=AsyncMock()))
+        run(command.callback(interaction, S(value="roles")))
+        text = interaction.response.send_message.call_args.args[0]
+        self.assertTrue(all(role in text for role in m.DESCRIPTIONS))
+        self.assertLessEqual(len(text), 2000)
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.players[2].inbox = ["새로운 조사 결과"]
+        details = m.role_details(game, game.players[2], results=False)
+        self.assertNotIn(m.DESCRIPTIONS["경찰"], details)
+        self.assertNotIn("새로운 조사 결과", details)
+        self.assertIn("새로운 조사 결과", m.role_details(game, game.players[2]))
 
 
 class TimerSchedulingTests(unittest.TestCase):

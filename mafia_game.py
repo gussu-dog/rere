@@ -69,6 +69,8 @@ class Game:
     extension_round: int = 0
     extension_seconds: int = 0
     extension_notice: str = ""
+    private_recipients: dict[int, discord.Interaction] = field(default_factory=dict)
+    night_inbox_offsets: dict[int, int] = field(default_factory=dict)
 
     def alive(self) -> list[Player]:
         return [p for p in self.players.values() if p.alive]
@@ -120,6 +122,7 @@ class Game:
                 or player.role == "스파이" and not player.connected_day)
 
     def prepare_night(self) -> None:
+        self.night_inbox_offsets = {p.player_id: len(p.inbox) for p in self.alive()}
         for player in self.alive():
             if not self.needs_night_action(player):
                 self.actions.setdefault(player.player_id, None)
@@ -199,6 +202,7 @@ class Game:
                     player.inbox.append(f"{self.day}일 밤 · 접선하지 못했어요.")
             elif player.role == "의사":
                 protected.add(target)
+                player.inbox.append(f"{self.day}일 밤 · {subject.name} 보호에 성공했어요.")
             elif player.role == "경찰":
                 result = "마피아" if subject.role in MAFIA - {"스파이"} else "시민"
                 player.inbox.append(f"{self.day}일 밤 · {subject.name} 조사 결과는 {result}예요.")
@@ -211,6 +215,7 @@ class Game:
             elif player.role == "기자":
                 player.used = True
                 articles.append(f"【기사】 {subject.name}의 역할은 {subject.role}!")
+                player.inbox.append(f"{self.day}일 밤 · 취재 성공! {subject.name}의 역할은 {subject.role}이에요.")
         manipulated = any(p.role == "해커" and self.team_access(p) and p.player_id not in blocked for p in self.alive())
         self.news = []
         dead = set()
@@ -221,13 +226,16 @@ class Game:
             if not self.check(attacker, attack=True, automatic=attacker.role == "마피아" and manipulated):
                 continue
             if victim in protected:
+                attacker.inbox.append(f"{self.day}일 밤 · {self.players[victim].name} 공격이 보호에 막혔어요.")
                 continue
             player = self.players[victim]
             if player.role == "군인" and not player.used and self.check(player):
                 player.used = True
                 player.inbox.append("군인 능력으로 밤 공격을 한 번 버텼어요.")
+                attacker.inbox.append(f"{self.day}일 밤 · {player.name}가 공격을 버텼어요.")
             else:
                 dead.add(victim)
+                attacker.inbox.append(f"{self.day}일 밤 · {player.name} 공격에 성공했어요.")
         for uid in sorted(dead):
             self.players[uid].alive = False
             self.news.append(f"{self.players[uid].name}님이 밤사이 사망했어요.")
@@ -393,6 +401,44 @@ async def phase_clock(game: Game, revision: int) -> None:
         print("".join(traceback.format_tb(exc.__traceback__)), flush=True)
 
 
+async def send_night_results(game: Game) -> None:
+    cards: dict[int, list[str]] = {}
+    for actor, offset in game.night_inbox_offsets.items():
+        player = game.players[actor]
+        details = [player.name, f"{game.day}일째 밤 · 행동 결과"]
+        if actor in game.actions and (game.actions[actor] is not None or game.needs_night_action(player)):
+            target = game.actions[actor]
+            name = game.players[target].name if target is not None else "사용하지 않기"
+            kind = "접선" if actor in game.contact_attempts else "능력"
+            details.append(f"{kind} 대상 · {name}")
+        if actor in game.attacks:
+            target = game.attacks[actor]
+            name = game.players[target].name if target is not None else "공격하지 않기"
+            details.append(f"공격 대상 · {name}")
+        results = player.inbox[offset:]
+        details.extend(["", *(results or ["이번 밤에는 별도 판정 결과가 없어요."])])
+        details.append(f"현재 상태 · {'생존' if player.alive else '탈락'}")
+        cards.setdefault(player.owner_id, []).append(code_box("\n".join(details)[:1700]))
+    for owner, player_cards in cards.items():
+        recipient = game.private_recipients.get(owner)
+        if recipient is None:
+            continue
+        chunks = []
+        message = "밤이 끝났어요! 캐릭터들의 행동 결과를 알려드릴게요.\n"
+        for card in player_cards:
+            if len(message) + len(card) + 2 > 1900:
+                chunks.append(message)
+                message = ""
+            message += "\n" + card
+        if message:
+            chunks.append(message)
+        try:
+            for chunk in chunks:
+                await recipient.followup.send(chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.HTTPException, OSError) as exc:
+            print(f"Mafia private night results failed ({type(exc).__name__}).", flush=True)
+
+
 async def finish_phase(game: Game, *, expired: bool = False) -> None:
     phase = game.phase
     if phase == "밤":
@@ -417,6 +463,8 @@ async def finish_phase(game: Game, *, expired: bool = False) -> None:
     game.extension_notice = ""
     set_phase_timer(game)
     await update_team_windows(game)
+    if phase == "밤":
+        await send_night_results(game)
     try:
         await refresh(game, repost=True)
     finally:
@@ -473,6 +521,7 @@ class TargetSelect(discord.ui.Select):
                 await interaction.response.send_message("이미 탈락한 대상이에요.", ephemeral=True)
                 return
             await interaction.response.defer()
+            game.private_recipients[interaction.user.id] = interaction
             collection = game.votes if self.kind == "vote" else game.attacks if self.kind == "attack" else game.actions
             collection[self.player_id] = target
             if self.kind == "contact":
@@ -536,6 +585,7 @@ class CharacterJoinSelect(discord.ui.Select):
                 return
             player_id = max(game.players, default=0) + 1
             game.players[player_id] = Player(player_id, name, owner_id=self.owner_id, character_value=value)
+            game.private_recipients[interaction.user.id] = interaction
             try:
                 await interaction.delete_original_response()
             except (discord.HTTPException, OSError) as exc:
@@ -601,6 +651,7 @@ async def open_team_chat(interaction: discord.Interaction, game: Game, actor: in
         if not chat_allowed(game, interaction.user.id, actor, game.day):
             await interaction.followup.send("밤에 생존한 마피아와 접선한 동료만 팀 대화를 열 수 있어요.", ephemeral=True)
             return
+        game.private_recipients[interaction.user.id] = interaction
         previous = game.team_windows.pop(actor, None)
         if previous:
             try:
@@ -666,17 +717,17 @@ class TeamChatView(MafiaView):
         await open_team_chat(interaction, self.game, self.actor)
 
 
-def role_details(game: Game, player: Player) -> str:
+def role_details(game: Game, player: Player, *, results: bool = True) -> str:
     details = [player.name, f"역할 · {player.role} · {'생존' if player.alive else '탈락'}",
-               "", DESCRIPTIONS[player.role], f"능력 성공률 {game.success_rate(player)}%"]
+               f"능력 성공률 {game.success_rate(player)}%"]
     if game.can_attack(player):
         details.append(f"공격 성공률 {game.success_rate(player, attack=True)}%")
     if game.phase == "밤" and not game.needs_night_action(player):
         details.append("별도 밤 행동은 자동으로 대기 처리해요.")
-    if game.team_access(player):
+    if results and game.team_access(player):
         partners = ", ".join(p.name for p in game.players.values() if game.team_access(p))
         details.extend(["", f"접선한 동료 · {partners}"])
-    if player.inbox:
+    if results and player.inbox:
         details.extend(["", "전달받은 정보", *player.inbox[-6:]])
     return "\n".join(details)[:1750]
 
@@ -806,6 +857,8 @@ class GameView(MafiaView):
                 if sessions.get(game.channel_id) is not game or game.phase == "종료" or self.revision != game.revision:
                     await interaction.response.send_message("이미 종료된 게임이에요.", ephemeral=True)
                     return
+                if any(p.owner_id == interaction.user.id for p in game.players.values()):
+                    game.private_recipients[interaction.user.id] = interaction
                 if label == "내 역할 / 결과" and player_id is None:
                     owned = [p for p in game.players.values() if p.owner_id == interaction.user.id]
                     if not owned or game.phase == "모집":
@@ -833,7 +886,7 @@ class GameView(MafiaView):
                     await interaction.response.defer()
                     for member in owned:
                         await interaction.followup.send(
-                            code_box(role_details(game, member)),
+                            code_box(role_details(game, member, results=False)),
                             view=CharacterActionView(self, member), ephemeral=True,
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
@@ -975,9 +1028,24 @@ def install(bot, registry) -> None:
 
     bot.add_listener(trace_mafia_button, "on_interaction")
 
-    @bot.tree.command(name="마피아게임", description="캐릭터 4~7명으로 마피아게임을 진행해요! 한 사람이 여러 캐릭터로 참가할 수 있어요.")
+    @bot.tree.command(name="마피아게임", description="마피아게임을 모집하거나 직업 설명을 확인해요!")
     @app_commands.guild_only()
-    async def mafia_game(interaction: discord.Interaction) -> None:
+    @app_commands.rename(mode="구분")
+    @app_commands.choices(mode=[app_commands.Choice(name="모집", value="lobby"),
+                               app_commands.Choice(name="직업설명", value="roles")])
+    async def mafia_game(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
+        if mode.value == "roles":
+            lines = ["마피아게임 직업 설명", "기본 성공률 30% + 참조 수치 × 0.6 · 최대 90%", ""]
+            for role, description in DESCRIPTIONS.items():
+                skills = "캐릭터가 가진 사격 중 최고값" if role == "마피아" else "·".join(sorted(ROLE_SKILLS[role])) + " 중 최고값"
+                lines.extend([f"{role} · {skills}", description, ""])
+            lines.extend(["접선은 성공한 대상이 마피아일 때 완료돼요. 새 능력과 팀 대화는 다음 밤부터 가능해요.",
+                          "밤 2분 · 토론 3분 · 투표 1분. 미선택 밤 행동은 무작위, 미투표는 기권이에요."])
+            await interaction.response.send_message(
+                "레레가 마피아게임 직업을 설명해드릴게요!\n\n" + code_box("\n".join(lines)),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         existing = sessions.get(interaction.channel_id)
         if existing:
             await interaction.response.defer(ephemeral=True, thinking=True)

@@ -59,8 +59,8 @@ class MafiaTests(unittest.TestCase):
         game = fixture(["해커", "경찰", "의사", "마피아", "탐정", "기자"])
         game.actions = {1: 2, 2: 1}
         game.resolve_night()
-        self.assertEqual(len(game.players[2].inbox), 1)
-        self.assertIn("방해", game.players[2].inbox[0])
+        self.assertIn("시민", game.players[2].inbox[-1])
+        self.assertFalse(any("방해" in line for line in game.players[2].inbox))
 
     def test_soldier_survives_once_doctor_protects_and_ties_skip(self):
         game = fixture(["마피아", "의사", "군인", "경찰", "기자", "탐정"])
@@ -914,6 +914,42 @@ class MafiaTests(unittest.TestCase):
             run(panel.callback_for("처형 반대", 4)(interaction))
         self.assertFalse(game.players[2].alive)
         self.assertEqual(game.phase, "밤")
+
+    def test_hacker_forges_investigations_even_when_investigator_would_fail(self):
+        for role in ("경찰", "탐정", "기자", "영매"):
+            game = fixture(["해커", role, "의사", "마피아", "군인", "기자"])
+            game.actions = {1: 2, 2: 3}
+            game.night_history[3] = {6}
+            game.players[6].alive = False
+            checks = []
+            def check(player, **kwargs):
+                checks.append(player.player_id)
+                return player.player_id == 1
+            with patch.object(game, "check", side_effect=check):
+                game.resolve_night()
+            self.assertNotIn(2, checks)
+            result = game.players[2].inbox[-1]
+            self.assertFalse(any("방해" in line or "실패" in line for line in game.players[2].inbox))
+            if role == "경찰":
+                self.assertIn("마피아", result)
+            elif role == "탐정":
+                self.assertNotIn("아무도 없음", result)
+            elif role == "기자":
+                self.assertTrue(game.players[2].used)
+                self.assertNotIn("역할은 의사", result)
+                self.assertTrue(any("【기사】" in line for line in game.news))
+            else:
+                self.assertIn("흔적이 없어요", result)
+
+    def test_hacked_medium_receives_fabricated_last_words(self):
+        game = fixture(["해커", "영매", "의사", "마피아"])
+        game.players[3].alive = False
+        game.players[3].last_words = "진짜 유언"
+        game.actions = {1: 2, 2: 3}
+        game.resolve_night()
+        self.assertIn("P3의 목소리", game.players[2].inbox[-1])
+        self.assertNotIn("진짜 유언", game.players[2].inbox[-1])
+
 
 
 class TimerSchedulingTests(unittest.TestCase):

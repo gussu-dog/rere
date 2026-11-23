@@ -15,7 +15,7 @@ PHASE_SECONDS = {"밤": 120, "토론": 600, "투표": 60, "최후변론": 60, "�
 DESCRIPTIONS = {
     "마피아": "매일 밤 사격으로 한 명을 공격해요. 접선한 해커가 살아 있으면 공격 판정이 자동 성공해요.",
     "스파이": "경찰에게 시민으로 보여요. 밤 행동으로 한 명에게 접선을 시도해요. 성공한 대상이 마피아면 다음 밤부터 별도 공격과 팀 대화가 가능해요.",
-    "해커": "한 명을 골라요. 마피아면 접선을 시도하고, 그 외에는 능력을 방해해요. 접선 성공 다음 밤부터 마피아의 공격 판정을 자동 성공시켜요.",
+    "해커": "한 명을 골라요. 마피아면 접선을 시도하고, 그 외에는 능력을 방해하고, 조사 결과는 거짓 정보로 바꿔요. 접선 성공 다음 밤부터 마피아의 공격 판정을 자동 성공시켜요.",
     "경찰": "추적·수사과학·관찰력 중 가장 높은 수치로 진영을 조사해요. 스파이는 시민으로 보여요.",
     "의사": "응급처치·의료·의학 중 가장 높은 수치로 한 명을 보호해요. 자신도 선택할 수 있어요.",
     "탐정": "추적·수사과학·관찰력 중 가장 높은 수치로 대상의 밤 행동 대상을 알아내요.",
@@ -257,10 +257,11 @@ class Game:
                    if self.players[uid].role == "해커" and uid not in self.contact_attempts
                    and target is not None and self.players[target].role != "마피아"
                    and self.check(self.players[uid])}
+        falsified = {uid for uid in blocked if self.players[uid].role in {"경찰", "탐정", "기자", "영매"}}
         guards = {uid: target for uid, target in actions.items()
                   if self.players[uid].role == "군인" and not self.players[uid].used
                   and uid not in blocked and target is not None}
-        for uid in blocked:
+        for uid in blocked - falsified:
             self.players[uid].inbox.append(f"{self.day}일 밤 · 누군가의 방해로 능력을 사용하지 못했어요.")
         for uid, target in actions.items():
             if uid not in blocked and target is not None and self.players[target].alive:
@@ -270,12 +271,12 @@ class Game:
         medium_targets = []
         for uid, target in actions.items():
             player = self.players[uid]
-            if uid in blocked or target is None or player.role == "군인" or player.role == "해커" and uid not in self.contact_attempts:
+            if (uid in blocked and uid not in falsified) or target is None or player.role == "군인" or player.role == "해커" and uid not in self.contact_attempts:
                 continue
             subject = self.players[target]
             if player.role == "기자" and player.used:
                 continue
-            if not self.check(player):
+            if uid not in falsified and not self.check(player):
                 continue
             if uid in self.contact_attempts:
                 if subject.role == "마피아":
@@ -291,17 +292,22 @@ class Game:
                 player.inbox.append(f"{self.day}일 밤 · {subject.name} 보호에 성공했어요.")
             elif player.role == "경찰":
                 result = "마피아" if subject.role in MAFIA - {"스파이"} else "시민"
+                if uid in falsified:
+                    result = "시민" if result == "마피아" else "마피아"
                 player.inbox.append(f"{self.day}일 밤 · {subject.name} 조사 결과는 {result}예요.")
             elif player.role == "탐정":
                 visited = actions.get(target)
                 if self.can_attack(subject):
                     visited = self.attacks.get(target)
+                if uid in falsified:
+                    visited = random.choice([pid for pid in self.players if pid != visited] + ([None] if visited is not None else []))
                 result = self.players[visited].name if visited is not None else "아무도 없음"
                 player.inbox.append(f"{self.day}일 밤 · {subject.name}의 행동 대상은 {result}이에요.")
             elif player.role == "기자":
                 player.used = True
-                articles.append(f"【기사】 {subject.name}의 역할은 {subject.role}!")
-                player.inbox.append(f"{self.day}일 밤 · 취재 성공! {subject.name}의 역할은 {subject.role}이에요.")
+                reported_role = random.choice([role for role in DESCRIPTIONS if role != subject.role]) if uid in falsified else subject.role
+                articles.append(f"【기사】 {subject.name}의 역할은 {reported_role}!")
+                player.inbox.append(f"{self.day}일 밤 · 취재 성공! {subject.name}의 역할은 {reported_role}이에요.")
         manipulated = any(p.role == "해커" and self.team_access(p) and p.player_id not in blocked for p in self.alive())
         self.news = []
         dead = set()
@@ -343,10 +349,15 @@ class Game:
             subject = self.players[target]
             if not subject.alive:
                 result = f"“{subject.last_words}”" if subject.last_words else "희미한 숨소리만 들려요."
+                if uid in falsified:
+                    result = random.choice([line for line in ("“내가 지켜보던 사람을 믿지 마.”", "“아무에게도 말하지 못한 게 있어.”", "“그날 밤의 선택을 다시 생각해 봐.”")
+                                            if line != result])
                 detail = f"{subject.name}의 목소리 · {result}"
             else:
                 names = [p.name for actor, p in self.players.items()
                          if not p.alive and actor in self.night_history.get(target, set())]
+                if uid in falsified:
+                    names = [] if names else [random.choice([p.name for p in self.players.values() if not p.alive] or ["이름 모를 누군가"])]
                 detail = (f"{subject.name}의 곁에 {', '.join(names)}의 흔적이 남아 있어요."
                           if names else f"{subject.name}의 곁에는 죽은 이의 흔적이 없어요.")
             self.players[uid].inbox.append(f"{self.day}일 밤 · {detail}")
@@ -1309,7 +1320,7 @@ def install(bot, registry) -> None:
                 "경찰에게 시민으로 보임. 접선 후 추가 공격",
                 "",
                 "해커 [자료조사] (마피아팀)",
-                "마피아 제외 선택한 캐릭터의 능력 방해. 접선 후 마피아 공격 무조건 성공",
+                "마피아 제외 능력 방해·조사 결과 조작. 접선 후 마피아 공격 무조건 성공",
                 "",
                 "경찰 [추적/수사과학/관찰력] (시민팀)",
                 "선택한 상대의 진영 조사",

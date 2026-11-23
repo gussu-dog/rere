@@ -21,11 +21,12 @@ DESCRIPTIONS = {
     "탐정": "추적·수사과학·관찰력 중 가장 높은 수치로 대상의 밤 행동 대상을 알아내요.",
     "기자": "자료조사로 정확한 역할을 취재해 다음 아침 공개해요. 성공은 게임 중 한 번이고 실패하면 다시 시도할 수 있어요.",
     "군인": "선택한 상대에게 들어온 공격을 한 번 대신 맞아요. 건강 기반 판정에 성공하면 버티고, 실패하면 대신 탈락해요.",
+    "영매": "정신력으로 사망자의 유언을 듣거나, 생존자가 밤에 선택했던 사망자들의 흔적을 살펴봐요.",
 }
 ROLE_SKILLS = {
     "마피아": {"사격"}, "스파이": {"은밀행동"}, "해커": {"자료조사"},
     "경찰": {"추적", "수사과학", "관찰력"}, "의사": {"응급처치", "의료", "의학"},
-    "탐정": {"추적", "수사과학", "관찰력"}, "기자": {"자료조사"}, "군인": {"건강"},
+    "탐정": {"추적", "수사과학", "관찰력"}, "기자": {"자료조사"}, "군인": {"건강"}, "영매": {"정신", "정신력"},
 }
 
 sessions: dict[int, Game] = {}
@@ -44,6 +45,7 @@ class Player:
     character_value: str = ""
     skill_values: dict[str, int] = field(default_factory=dict)
     connected_day: int = 0
+    last_words: str = ""
 
 
 @dataclass
@@ -72,6 +74,7 @@ class Game:
     discussion_proposal: str = ""
     private_recipients: dict[int, discord.Interaction] = field(default_factory=dict)
     night_inbox_offsets: dict[int, int] = field(default_factory=dict)
+    night_history: dict[int, set[int]] = field(default_factory=dict)
 
     def alive(self) -> list[Player]:
         return [p for p in self.players.values() if p.alive]
@@ -84,7 +87,7 @@ class Game:
         roles = ["마피아", "경찰", "의사"]
         if mafia_count == 2:
             roles.append(random.choice(["스파이", "해커"]))
-        roles += random.sample(["탐정", "기자", "군인"], count - len(roles))
+        roles += random.sample(["탐정", "기자", "군인", "영매"], count - len(roles))
         random.shuffle(roles)
         for player, role in zip(self.players.values(), roles):
             player.role = role
@@ -121,7 +124,7 @@ class Game:
         return player.alive and (player.role == "마피아" or player.role == "스파이" and self.team_access(player))
 
     def needs_night_action(self, player: Player) -> bool:
-        return (player.role in {"경찰", "의사", "탐정", "해커"}
+        return (player.role in {"경찰", "의사", "탐정", "해커", "영매"}
                 or player.role == "기자" and not player.used
                 or player.role == "스파이" and not player.connected_day
                 or player.role == "군인" and not player.used)
@@ -194,8 +197,12 @@ class Game:
                   and uid not in blocked and target is not None}
         for uid in blocked:
             self.players[uid].inbox.append(f"{self.day}일 밤 · 누군가의 방해로 능력을 사용하지 못했어요.")
+        for uid, target in actions.items():
+            if uid not in blocked and target is not None and self.players[target].alive:
+                self.night_history.setdefault(uid, set()).add(target)
         protected = set()
         articles = []
+        medium_targets = []
         for uid, target in actions.items():
             player = self.players[uid]
             if uid in blocked or target is None or player.role == "군인" or player.role == "해커" and uid not in self.contact_attempts:
@@ -204,7 +211,7 @@ class Game:
             if player.role == "기자" and player.used:
                 continue
             if not self.check(player):
-                if player.role in {"경찰", "탐정", "기자"}:
+                if player.role in {"경찰", "탐정", "기자", "영매"}:
                     player.inbox.append(f"{self.day}일 밤 · 실마리를 찾지 못했어요.")
                 continue
             if uid in self.contact_attempts:
@@ -214,6 +221,8 @@ class Game:
                     subject.inbox.append(f"{self.day}일 밤 · {player.role} {player.name}와 접선했어요! 다음 밤부터 함께할 수 있어요.")
                 else:
                     player.inbox.append(f"{self.day}일 밤 · 접선하지 못했어요.")
+            elif player.role == "영매":
+                medium_targets.append((uid, target))
             elif player.role == "의사":
                 protected.add(target)
                 player.inbox.append(f"{self.day}일 밤 · {subject.name} 보호에 성공했어요.")
@@ -237,6 +246,7 @@ class Game:
             attacker = self.players[uid]
             if uid not in active or uid in blocked or victim is None or not self.can_attack(attacker):
                 continue
+            self.night_history.setdefault(uid, set()).add(victim)
             if not self.check(attacker, attack=True, automatic=attacker.role == "마피아" and manipulated):
                 continue
             if victim in protected:
@@ -266,6 +276,17 @@ class Game:
         for uid in sorted(dead):
             self.players[uid].alive = False
             self.news.append(f"{self.players[uid].name}님이 밤사이 사망했어요.")
+        for uid, target in medium_targets:
+            subject = self.players[target]
+            if not subject.alive:
+                result = f"“{subject.last_words}”" if subject.last_words else "희미한 숨소리만 들려요."
+                detail = f"{subject.name}의 목소리 · {result}"
+            else:
+                names = [p.name for actor, p in self.players.items()
+                         if not p.alive and actor in self.night_history.get(target, set())]
+                detail = (f"{subject.name}의 곁에 {', '.join(names)}의 흔적이 남아 있어요."
+                          if names else f"{subject.name}의 곁에는 죽은 이의 흔적이 없어요.")
+            self.players[uid].inbox.append(f"{self.day}일 밤 · {detail}")
         if not self.news:
             self.news.append("오늘 밤에는 아무도 사망하지 않았어요.")
         self.news.extend(articles)
@@ -352,7 +373,8 @@ def code_box(text: str) -> str:
 
 
 def target_candidates(game: Game, player_id: int, kind: str) -> list[int]:
-    return [p.player_id for p in game.alive()
+    candidates = game.players.values() if kind == "action" and game.players[player_id].role == "영매" else game.alive()
+    return [p.player_id for p in candidates
             if kind == "vote" or (kind == "action" and game.players[player_id].role == "의사")
             or (p.player_id != player_id and (kind != "attack" or
                 not (game.team_access(game.players[player_id]) and game.team_access(p))))]
@@ -468,6 +490,7 @@ async def send_night_results(game: Game) -> None:
 
 async def finish_phase(game: Game, *, expired: bool = False) -> None:
     phase = game.phase
+    previously_alive = {p.player_id for p in game.alive()}
     if phase == "밤":
         if expired:
             game.fill_missing_night_choices()
@@ -493,6 +516,8 @@ async def finish_phase(game: Game, *, expired: bool = False) -> None:
     await update_team_windows(game)
     if phase == "밤":
         await send_night_results(game)
+    newly_dead = previously_alive - {p.player_id for p in game.alive()}
+    await send_last_words_prompts(game, newly_dead)
     try:
         await refresh(game, repost=True)
     finally:
@@ -521,10 +546,80 @@ class MafiaView(discord.ui.View):
             print(f"Mafia error notice failed ({type(notify_error).__name__}).", flush=True)
 
 
+def last_words_allowed(game: Game, owner_id: int, actor: int) -> bool:
+    player = game.players.get(actor)
+    return game.phase != "모집" and player is not None and not player.alive and player.owner_id == owner_id
+
+
+class LastWordsModal(discord.ui.Modal, title="영매에게 남길 유언"):
+    text = discord.ui.TextInput(label="유언", style=discord.TextStyle.paragraph, max_length=100)
+
+    def __init__(self, game: Game, actor: int):
+        super().__init__(title=f"{game.players[actor].name[:30]}의 유언", timeout=None)
+        self.game, self.actor = game, actor
+        self.text.default = game.players[actor].last_words
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        async with self.game.lock:
+            if not last_words_allowed(self.game, interaction.user.id, self.actor):
+                await interaction.edit_original_response(content="본인이 맡은 사망 캐릭터만 유언을 남길 수 있어요.")
+                return
+            text = self.text.value.strip()
+            if not text or len(text) > 100:
+                await interaction.edit_original_response(content="유언은 1~100자로 적어 주세요.")
+                return
+            self.game.players[self.actor].last_words = text
+            await interaction.edit_original_response(content="영매에게 전할 유언을 남겼어요.")
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        print(f"Mafia last words failed ({type(error).__name__}).", flush=True)
+        if interaction.response.is_done():
+            await interaction.followup.send("유언을 남기는 중 오류가 났어요. 행동 버튼에서 다시 확인해 주세요.", ephemeral=True)
+        else:
+            await interaction.response.send_message("유언을 남기지 못했어요. 다시 시도해 주세요.", ephemeral=True)
+
+
+class LastWordsView(MafiaView):
+    def __init__(self, game: Game, actor: int):
+        super().__init__(timeout=None)
+        self.game, self.actor = game, actor
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if last_words_allowed(self.game, interaction.user.id, self.actor):
+            return True
+        await interaction.response.send_message("본인이 맡은 사망 캐릭터만 유언을 남길 수 있어요.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="유언 남기기")
+    async def write(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(LastWordsModal(self.game, self.actor))
+
+
+async def send_last_words_prompts(game: Game, actors: set[int]) -> None:
+    for actor in sorted(actors):
+        player = game.players[actor]
+        recipient = game.private_recipients.get(player.owner_id)
+        if recipient is None:
+            continue
+        try:
+            await recipient.followup.send(
+                code_box(f"{player.name}가 사망했어요.\n영매에게 전할 유언을 남길 수 있어요."),
+                view=LastWordsView(game, actor), ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.HTTPException, OSError) as exc:
+            print(f"Mafia last words prompt failed ({type(exc).__name__}).", flush=True)
+
+
 class TargetSelect(discord.ui.Select):
     def __init__(self, game: Game, player_id: int, kind: str):
-        options = [discord.SelectOption(label=game.players[target].name[:100], value=str(target))
-                   for target in target_candidates(game, player_id, kind)]
+        medium = kind == "action" and game.players[player_id].role == "영매"
+        options = [discord.SelectOption(
+            label=(game.players[target].name[:90] + (" · 생존" if game.players[target].alive else " · 사망"))
+                  if medium else game.players[target].name[:100],
+            value=str(target),
+        ) for target in target_candidates(game, player_id, kind)]
         options.append(discord.SelectOption(label="사용하지 않기 / 기권", value="skip"))
         super().__init__(placeholder="대상을 골라 주세요", options=options)
         self.game, self.player_id, self.kind = game, player_id, kind
@@ -545,7 +640,8 @@ class TargetSelect(discord.ui.Select):
                 await interaction.followup.send("선택 시간이 끝나 다음 단계로 넘어갔어요.", ephemeral=True)
                 return
             target = None if self.values[0] == "skip" else int(self.values[0])
-            if target is not None and not game.players[target].alive:
+            if target is not None and not game.players[target].alive and not (
+                    self.kind == "action" and game.players[self.player_id].role == "영매"):
                 await interaction.response.send_message("이미 탈락한 대상이에요.", ephemeral=True)
                 return
             await interaction.response.defer()
@@ -821,7 +917,7 @@ class GameView(MafiaView):
             )
             button.callback = self.callback_for(label)
             if label == "행동":
-                button.disabled = game.phase not in {"밤", "투표"}
+                button.disabled = game.phase not in {"밤", "토론", "투표"}
             elif label == "마피아 공격":
                 button.disabled = game.phase != "밤"
             elif label in {"접선", "팀 대화"}:
@@ -908,12 +1004,20 @@ class GameView(MafiaView):
                         await interaction.followup.send(chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
                     return
                 if label == "행동":
-                    owned = [p for p in game.alive() if p.owner_id == interaction.user.id]
-                    if not owned or game.phase not in {"밤", "투표"}:
+                    owned = [p for p in game.players.values() if p.owner_id == interaction.user.id
+                             and (not p.alive or game.phase in {"밤", "투표"})]
+                    if not owned or game.phase not in {"밤", "토론", "투표"}:
                         await interaction.response.send_message("지금 행동할 수 있는 캐릭터가 없어요.", ephemeral=True)
                         return
                     await interaction.response.defer()
                     for member in owned:
+                        if not member.alive:
+                            await interaction.followup.send(
+                                code_box(f"{member.name} · 사망\n영매에게 전할 유언을 남길 수 있어요."),
+                                view=LastWordsView(game, member.player_id), ephemeral=True,
+                                allowed_mentions=discord.AllowedMentions.none(),
+                            )
+                            continue
                         await interaction.followup.send(
                             code_box(role_details(game, member, results=False)),
                             view=CharacterActionView(self, member), ephemeral=True,
@@ -1088,6 +1192,9 @@ def install(bot, registry) -> None:
                 "",
                 "군인 [건강] (시민팀)",
                 "대상을 보호. 1회 공격을 버팀.",
+                "",
+                "영매 [정신/정신력] (시민팀)",
+                "사망자의 유언 청취. 생존자 곁에 남은 사망자의 흔적 확인",
                 "",
                 "기능치 참조 최대 90% 확률",
                 "스파이와 해커는 마피아와 접선하면 추가능력이 해금됩니다.",

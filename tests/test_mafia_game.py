@@ -473,7 +473,7 @@ class MafiaTests(unittest.TestCase):
         def interaction(uid):
             return S(user=S(id=uid), response=S(defer=AsyncMock(), send_message=AsyncMock()))
         panel = m.GameView(game)
-        self.assertTrue(next(b for b in panel.children if b.label == "행동").disabled)
+        self.assertFalse(next(b for b in panel.children if b.label == "행동").disabled)
         self.assertFalse(hasattr(m, "DayMessageModal"))
         with patch.object(m, "refresh", AsyncMock()), patch.object(m.time, "time", return_value=100):
             run(panel.callback_for("토론 연장")(interaction(99)))
@@ -658,6 +658,109 @@ class MafiaTests(unittest.TestCase):
         self.assertFalse(game.team_windows)
         self.assertIsNone(first.edit.call_args.kwargs["view"])
         self.assertIsNone(second.edit.call_args.kwargs["view"])
+
+    def test_medium_is_random_citizen_role_and_can_select_dead_characters(self):
+        game = fixture([""] * 4)
+        with patch.object(m.random, "sample", return_value=["영매"]), patch.object(m.random, "shuffle"):
+            game.start()
+        self.assertEqual([p.role for p in game.players.values()], ["마피아", "경찰", "의사", "영매"])
+        medium = game.players[4]
+        self.assertTrue(game.needs_night_action(medium))
+        medium.skill_values = {"정신": 80}
+        self.assertEqual(game.success_rate(medium), 78)
+        game.players[2].alive = False
+        self.assertIn(2, m.target_candidates(game, 4, "action"))
+        self.assertNotIn(2, m.target_candidates(game, 3, "action"))
+        self.assertNotIn(2, m.target_candidates(game, 1, "attack"))
+        medium.owner_id = 99
+        m.sessions[10] = game
+        choice = m.TargetSelect(game, 4, "action")
+        choice._values = ["2"]
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()), edit_original_response=AsyncMock())
+        with patch.object(m, "refresh", AsyncMock()):
+            run(choice.callback(interaction))
+        self.assertEqual(game.actions[4], 2)
+
+    def test_medium_hears_only_written_will_or_empty_whisper(self):
+        game = fixture(["마피아", "영매", "의사", "경찰", "군인", "기자"])
+        game.players[6].alive = False
+        game.players[6].last_words = "경찰의 말을 다시 생각해 봐."
+        game.actions = {2: 6}
+        game.resolve_night()
+        result = game.players[2].inbox[-1]
+        self.assertIn("P6", result)
+        self.assertIn("경찰의 말을 다시 생각해 봐.", result)
+        self.assertNotIn("P1", result)
+        self.assertNotIn(6, game.night_history.get(2, set()))
+        game.players[6].last_words = ""
+        game.resolve_night()
+        self.assertIn("희미한 숨소리", game.players[2].inbox[-1])
+
+    def test_medium_tracks_failed_night_actions_but_not_votes_or_blocked_actions(self):
+        game = fixture(["마피아", "영매", "경찰", "해커", "의사", "기자"])
+        game.actions = {3: 6}
+        game.attacks = {1: 6}
+        with patch.object(m.random, "randint", return_value=100):
+            game.resolve_night()
+        self.assertEqual(game.night_history[3], {6})
+        self.assertEqual(game.night_history[1], {6})
+        game.votes = {1: 5}
+        game.resolve_vote()
+        self.assertNotIn(5, game.night_history[1])
+        game.players[6].alive = False
+        game.actions, game.attacks = {2: 3}, {}
+        game.resolve_night()
+        result = game.players[2].inbox[-1]
+        self.assertIn("P3", result)
+        self.assertIn("P6", result)
+        self.assertNotIn("기자", result)
+        blocked = fixture(["마피아", "영매", "경찰", "해커", "의사", "기자"])
+        blocked.actions = {3: 6, 4: 3}
+        blocked.resolve_night()
+        self.assertNotIn(3, blocked.night_history)
+
+    def test_last_words_prompt_is_private_and_reveals_no_killer(self):
+        game = fixture(["마피아", "영매", "의사", "경찰", "군인", "기자"])
+        game.players[6].owner_id = 99
+        game.prepare_night()
+        game.attacks = {1: 6}
+        recipient = S(followup=S(send=AsyncMock()))
+        game.private_recipients = {99: recipient}
+        m.sessions[10] = game
+        with patch.object(m, "refresh", AsyncMock()):
+            run(m.finish_phase(game))
+        messages = recipient.followup.send.call_args_list
+        self.assertEqual(len(messages), 2)
+        self.assertTrue(all(call.kwargs["ephemeral"] for call in messages))
+        self.assertFalse(any("P1" in call.args[0] for call in messages))
+        prompt = messages[-1]
+        self.assertIn("P6", prompt.args[0])
+        self.assertIsInstance(prompt.kwargs["view"], m.LastWordsView)
+        self.assertEqual(prompt.kwargs["view"].children[0].label, "유언 남기기")
+        reader = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock()), followup=S(send=AsyncMock()))
+        run(m.GameView(game).callback_for("행동")(reader))
+        self.assertIsInstance(reader.followup.send.call_args.kwargs["view"], m.LastWordsView)
+
+    def test_last_words_modal_checks_owner_death_and_length(self):
+        game = fixture(["마피아", "영매", "의사", "경찰"])
+        game.players[3].owner_id = 99
+        game.players[3].alive = False
+        modal = m.LastWordsModal(game, 3)
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock()), edit_original_response=AsyncMock())
+        modal.text._value = "한 명의 말만 믿지 마."
+        run(modal.on_submit(interaction))
+        self.assertEqual(game.players[3].last_words, "한 명의 말만 믿지 마.")
+        modal.text._value = "x" * 101
+        run(modal.on_submit(interaction))
+        self.assertNotEqual(game.players[3].last_words, "x" * 101)
+        interaction.user.id = 100
+        modal.text._value = "다른 사람의 글"
+        run(modal.on_submit(interaction))
+        self.assertEqual(game.players[3].last_words, "한 명의 말만 믿지 마.")
+        interaction.user.id = 99
+        game.players[3].alive = True
+        run(modal.on_submit(interaction))
+        self.assertEqual(game.players[3].last_words, "한 명의 말만 믿지 마.")
 
 
 class TimerSchedulingTests(unittest.TestCase):

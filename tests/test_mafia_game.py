@@ -22,6 +22,9 @@ class MafiaTests(unittest.TestCase):
         rolls.start()
         self.addCleanup(rolls.stop)
         self.addCleanup(m.sessions.clear)
+        announcements = patch.object(m, "announce_discussion", AsyncMock())
+        self.announcements = announcements.start()
+        self.addCleanup(announcements.stop)
         timers = patch.object(m, "set_phase_timer")
         timers.start()
         self.addCleanup(timers.stop)
@@ -491,12 +494,15 @@ class MafiaTests(unittest.TestCase):
         with patch.object(m, "refresh", AsyncMock()), patch.object(m.time, "time", return_value=100):
             run(panel.callback_for("토론 연장")(interaction(99)))
             self.assertEqual(game.discussion_votes, {99: True})
+            self.assertIn("토론 연장", self.announcements.call_args.args[2])
+            self.assertIn("신청", self.announcements.call_args.args[2])
             self.assertEqual(game.deadline, 1000)
             vote_panel = m.GameView(game)
             run(vote_panel.callback_for("찬성")(interaction(100)))
             self.assertIsNone(game.discussion_votes)
             self.assertEqual(game.deadline, 1300)
             self.assertEqual(game.extension_seconds, 300)
+            self.assertIn("5분 연장", self.announcements.call_args.args[2])
             m.set_phase_timer.assert_called_once_with(game, deadline=1300)
             self.assertIn("전원 찬성", game.render())
 
@@ -977,6 +983,23 @@ class MafiaTests(unittest.TestCase):
             self.assertFalse(any(" · 0표" in line for line in game.vote_summary))
             self.assertEqual(len(game.vote_summary), 3 if any(" · 1표" in line for line in game.vote_summary) else 1)
 
+
+
+class DiscussionAnnouncementTests(unittest.TestCase):
+    def test_new_public_notice_has_only_current_poll_buttons(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase = "토론"
+        game.discussion_round = 2
+        game.discussion_votes = {1: True}
+        interaction = S(followup=S(send=AsyncMock()))
+        run(m.announce_discussion(interaction, game, "토론 연장 신청"))
+        options = interaction.followup.send.call_args.kwargs
+        self.assertFalse(options.get("ephemeral", False))
+        self.assertEqual([b.label for b in options["view"].children], ["찬성", "반대"])
+        self.assertEqual(options["view"].discussion_round, 2)
+        game.discussion_votes = None
+        run(m.announce_discussion(interaction, game, "반대로 유지"))
+        self.assertNotIn("view", interaction.followup.send.call_args.kwargs)
 
 
 class TimerSchedulingTests(unittest.TestCase):

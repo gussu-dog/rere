@@ -1204,7 +1204,8 @@ class GameView(MafiaView):
                         await interaction.response.defer()
                         await finish_phase(game, expired=True)
                         return
-                    if label in {"토론 연장", "토론 단축"}:
+                    requested = label in {"토론 연장", "토론 단축"}
+                    if requested:
                         if game.discussion_votes is not None:
                             await interaction.response.send_message("이미 토론 시간에 대한 의견을 모으고 있어요.", ephemeral=True)
                             return
@@ -1223,6 +1224,7 @@ class GameView(MafiaView):
                         game.discussion_votes = None
                         if game.discussion_proposal == "토론 단축":
                             await interaction.response.defer()
+                            await announce_discussion(interaction, game, "전원 찬성으로 토론을 마칠게요! 투표를 시작해 주세요!")
                             await finish_phase(game)
                             return
                         game.extension_seconds += 300
@@ -1233,6 +1235,11 @@ class GameView(MafiaView):
                     else:
                         game.extension_notice = f"{game.discussion_proposal} 요청 · 찬성 {len(game.discussion_votes)}/{len(voters)}명"
                     await interaction.response.defer()
+                    if requested or game.discussion_votes is None:
+                        notice = (f"<@{interaction.user.id}>님이 {game.discussion_proposal}을 신청했어요!\n"
+                                  + code_box(game.extension_notice) + "\n찬성이나 반대를 눌러 주세요!"
+                                  if game.discussion_votes is not None else game.extension_notice)
+                        await announce_discussion(interaction, game, notice)
                     await refresh(game)
                     return
                 if label == "시작" and game.phase == "모집":
@@ -1300,6 +1307,20 @@ class GameView(MafiaView):
                 if game.phase == "종료":
                     sessions.pop(game.channel_id, None)
         return callback
+
+
+async def announce_discussion(interaction: discord.Interaction, game: Game, text: str) -> None:
+    options = {"allowed_mentions": discord.AllowedMentions.none()}
+    if game.phase == "토론" and game.discussion_votes is not None:
+        view = GameView(game)
+        for item in list(view.children):
+            if item.label not in {"찬성", "반대"}:
+                view.remove_item(item)
+        options["view"] = view
+    try:
+        await interaction.followup.send(text, **options)
+    except (discord.HTTPException, OSError) as exc:
+        print(f"Mafia discussion announcement failed ({type(exc).__name__}).", flush=True)
 
 
 def install(bot, registry) -> None:

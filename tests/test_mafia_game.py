@@ -615,6 +615,27 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual(game.phase, "투표")
         self.assertEqual(m.PHASE_SECONDS["토론"], 600)
 
+    def test_role_card_shows_one_rate_and_never_lists_self_as_contact(self):
+        game = fixture(["마피아", "스파이", "경찰", "의사"])
+        mafia = game.players[1]
+        mafia.skill_values = {"사격 | 권총": 25}
+        alone = m.role_details(game, mafia)
+        self.assertIn("공격 성공률 45%", alone)
+        self.assertEqual(alone.count("성공률"), 1)
+        self.assertNotIn("접선한 동료", alone)
+        game.players[2].connected_day = 1
+        self.assertIn("접선한 동료 · P2", m.role_details(game, mafia))
+        self.assertNotIn("접선한 동료 · P1", m.role_details(game, mafia))
+        spy = game.players[2]
+        spy.skill_values = {"은밀행동": 80, "사격 | 권총": 20}
+        connected = m.role_details(game, spy)
+        self.assertIn("공격 성공률 42%", connected)
+        self.assertEqual(connected.count("성공률"), 1)
+        self.assertIn("접선한 동료 · P1", connected)
+        spy.connected_day = 0
+        self.assertIn("능력 성공률 78%", m.role_details(game, spy))
+        self.assertNotIn("접선한 동료", m.role_details(game, spy))
+
 
 class TimerSchedulingTests(unittest.TestCase):
     def test_new_phase_replaces_timer_and_end_cancels_it(self):

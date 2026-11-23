@@ -743,15 +743,18 @@ class TeamChatView(MafiaView):
 
 
 def role_details(game: Game, player: Player, *, results: bool = True) -> str:
-    details = [player.name, f"역할 · {player.role} · {'생존' if player.alive else '탈락'}",
-               f"능력 성공률 {game.success_rate(player)}%"]
-    if game.can_attack(player):
+    details = [player.name, f"역할 · {player.role} · {'생존' if player.alive else '탈락'}"]
+    if player.role == "마피아" or player.role == "스파이" and 0 < player.connected_day <= game.day:
         details.append(f"공격 성공률 {game.success_rate(player, attack=True)}%")
+    else:
+        details.append(f"능력 성공률 {game.success_rate(player)}%")
     if game.phase == "밤" and not game.needs_night_action(player):
         details.append("별도 밤 행동은 자동으로 대기 처리해요.")
     if results and game.team_access(player):
-        partners = ", ".join(p.name for p in game.players.values() if game.team_access(p))
-        details.extend(["", f"접선한 동료 · {partners}"])
+        partners = ", ".join(p.name for p in game.players.values()
+                             if p.player_id != player.player_id and game.team_access(p))
+        if partners:
+            details.extend(["", f"접선한 동료 · {partners}"])
     if results and player.inbox:
         details.extend(["", "전달받은 정보", *player.inbox[-6:]])
     return "\n".join(details)[:1750]

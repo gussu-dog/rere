@@ -758,11 +758,17 @@ class MafiaTests(unittest.TestCase):
         game = fixture(["마피아", "영매", "의사", "경찰"])
         game.players[3].owner_id = 99
         game.players[3].alive = False
-        modal = m.LastWordsModal(game, 3)
+        source = S(delete_original_response=AsyncMock())
+        modal = m.LastWordsModal(game, 3, source)
         interaction = S(user=S(id=99), response=S(defer=AsyncMock()), edit_original_response=AsyncMock())
         modal.text._value = "한 명의 말만 믿지 마."
         run(modal.on_submit(interaction))
         self.assertEqual(game.players[3].last_words, "한 명의 말만 믿지 마.")
+        source.delete_original_response.assert_awaited_once()
+        self.assertFalse(m.last_words_allowed(game, 99, 3))
+        reader = S(user=S(id=99), response=S(send_message=AsyncMock()))
+        run(m.GameView(game).callback_for("행동")(reader))
+        reader.response.send_message.assert_awaited_once()
         modal.text._value = "x" * 101
         run(modal.on_submit(interaction))
         self.assertNotEqual(game.players[3].last_words, "x" * 101)

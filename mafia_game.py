@@ -652,29 +652,35 @@ class MafiaView(discord.ui.View):
 
 def last_words_allowed(game: Game, owner_id: int, actor: int) -> bool:
     player = game.players.get(actor)
-    return game.phase != "모집" and player is not None and not player.alive and player.owner_id == owner_id
+    return game.phase != "모집" and player is not None and not player.alive and not player.last_words and player.owner_id == owner_id
 
 
 class LastWordsModal(discord.ui.Modal, title="영매에게 남길 유언"):
     text = discord.ui.TextInput(label="유언", style=discord.TextStyle.paragraph, max_length=100)
 
-    def __init__(self, game: Game, actor: int):
+    def __init__(self, game: Game, actor: int, source: discord.Interaction | None = None):
         super().__init__(title=f"{game.players[actor].name[:30]}의 유언", timeout=None)
         self.game, self.actor = game, actor
+        self.source = source
         self.text.default = game.players[actor].last_words
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         async with self.game.lock:
             if not last_words_allowed(self.game, interaction.user.id, self.actor):
-                await interaction.edit_original_response(content="본인이 맡은 사망 캐릭터만 유언을 남길 수 있어요.")
+                await interaction.edit_original_response(content="본인이 맡은 사망 캐릭터만 유언을 한 번 남길 수 있어요.")
                 return
             text = self.text.value.strip()
             if not text or len(text) > 100:
                 await interaction.edit_original_response(content="유언은 1~100자로 적어 주세요.")
                 return
             self.game.players[self.actor].last_words = text
-            await interaction.edit_original_response(content="영매에게 전할 유언을 남겼어요.")
+            await interaction.edit_original_response(content="영매에게 전할 유언을 남겼어요.", view=None)
+            if self.source is not None:
+                try:
+                    await self.source.delete_original_response()
+                except (discord.HTTPException, OSError):
+                    pass
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         print(f"Mafia last words failed ({type(error).__name__}).", flush=True)
@@ -692,19 +698,19 @@ class LastWordsView(MafiaView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if last_words_allowed(self.game, interaction.user.id, self.actor):
             return True
-        await interaction.response.send_message("본인이 맡은 사망 캐릭터만 유언을 남길 수 있어요.", ephemeral=True)
+        await interaction.response.send_message("본인이 맡은 사망 캐릭터만 유언을 한 번 남길 수 있어요.", ephemeral=True)
         return False
 
     @discord.ui.button(label="유언 남기기")
     async def write(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(LastWordsModal(self.game, self.actor))
+        await interaction.response.send_modal(LastWordsModal(self.game, self.actor, interaction))
 
 
 async def send_last_words_prompts(game: Game, actors: set[int]) -> None:
     for actor in sorted(actors):
         player = game.players[actor]
         recipient = game.private_recipients.get(player.owner_id)
-        if recipient is None:
+        if recipient is None or player.last_words:
             continue
         try:
             await recipient.followup.send(
@@ -1116,7 +1122,7 @@ class GameView(MafiaView):
                     return
                 if label == "행동":
                     owned = [p for p in game.players.values() if p.owner_id == interaction.user.id
-                             and (not p.alive or game.phase in {"밤", "투표"})]
+                             and ((not p.alive and not p.last_words) or (p.alive and game.phase in {"밤", "투표"}))]
                     if not owned or game.phase not in {"밤", "토론", "투표"}:
                         await interaction.response.send_message("지금 행동할 수 있는 캐릭터가 없어요.", ephemeral=True)
                         return

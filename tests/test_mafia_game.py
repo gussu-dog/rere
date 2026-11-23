@@ -798,7 +798,11 @@ class MafiaTests(unittest.TestCase):
             options = [(option.value, option.label) for option in select.options]
             if expected is None:
                 expected = options
-            self.assertEqual(options, expected)
+            if player.role == "영매":
+                self.assertIn("6", [value for value, label in options])
+            else:
+                self.assertEqual(options, expected)
+                self.assertNotIn("6", [value for value, label in options])
             card = m.role_details(game, player, results=False)
             self.assertNotIn(player.role, card)
             self.assertNotIn("성공률", card)
@@ -1025,6 +1029,20 @@ class MafiaTests(unittest.TestCase):
             game.players[pid].skill_values = skills
             self.assertEqual(game.success_rate(game.players[pid]), expected)
         self.assertEqual(game.success_rate(game.players[1], attack=True), 68)
+
+
+    def test_nonmedium_cannot_submit_dead_target_from_hidden_picker(self):
+        game = fixture(["마피아", "경찰", "의사", "영매"])
+        game.players[3].alive = False
+        game.players[2].owner_id = 99
+        m.sessions[10] = game
+        select = m.TargetSelect(game, 2, "hidden")
+        select._values = ["3"]
+        interaction = S(user=S(id=99), response=S(send_message=AsyncMock(), defer=AsyncMock()))
+        run(select.callback(interaction))
+        self.assertIn("탈落".replace("落", "락"), interaction.response.send_message.call_args.args[0])
+        interaction.response.defer.assert_not_awaited()
+        self.assertNotIn(2, game.actions)
 
 
 

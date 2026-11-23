@@ -485,7 +485,7 @@ def code_box(text: str) -> str:
 
 def target_candidates(game: Game, player_id: int, kind: str) -> list[int]:
     if kind == "hidden":
-        return list(game.players)
+        return list(game.players) if game.players[player_id].role == "영매" else [p.player_id for p in game.alive()]
     candidates = game.players.values() if kind == "action" and game.players[player_id].role == "영매" else game.alive()
     return [p.player_id for p in candidates
             if kind == "vote" or (kind == "action" and game.players[player_id].role == "의사")
@@ -770,7 +770,7 @@ class TargetSelect(discord.ui.Select):
                 return
             target = None if self.values[0] == "skip" else int(self.values[0])
             if target is not None and not game.players[target].alive and not (
-                    self.kind == "hidden" or self.kind == "action" and game.players[self.player_id].role == "영매"):
+                    self.kind in {"hidden", "action"} and game.players[self.player_id].role == "영매"):
                 await interaction.response.send_message("이미 탈락한 대상이에요.", ephemeral=True)
                 return
             await interaction.response.defer()

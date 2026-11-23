@@ -822,7 +822,7 @@ def chat_allowed(game: Game, owner_id: int, actor: int, day: int) -> bool:
             and (not game.deadline or time.time() < game.deadline) and player is not None and player.owner_id == owner_id and game.team_chat_available(player))
 
 
-async def update_team_windows(game: Game) -> None:
+async def update_team_windows(game: Game, *, repost: bool = False) -> None:
     for actor, (day, message) in list(game.team_windows.items()):
         player = game.players[actor]
         opened = chat_allowed(game, player.owner_id, actor, day)
@@ -830,6 +830,26 @@ async def update_team_windows(game: Game) -> None:
         if not opened:
             content += "\n밤 대화가 끝났어요. 다음 밤에 팀 대화를 다시 열어 주세요!"
         try:
+            if opened and repost:
+                recipient = game.private_recipients.get(player.owner_id)
+                if recipient is not None:
+                    try:
+                        updated = await recipient.followup.send(
+                            content, view=TeamChatView(game, actor, day), ephemeral=True, wait=True,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    except (discord.HTTPException, OSError):
+                        updated = None
+                    if updated is not None:
+                        game.team_windows[actor] = (day, updated)
+                        try:
+                            await message.delete()
+                        except (discord.HTTPException, OSError):
+                            try:
+                                await message.edit(view=None)
+                            except (discord.HTTPException, OSError):
+                                pass
+                        continue
             await message.edit(content=content, view=TeamChatView(game, actor, day) if opened else None,
                                allowed_mentions=discord.AllowedMentions.none())
         except (discord.HTTPException, OSError):
@@ -879,8 +899,9 @@ class TeamMessageModal(discord.ui.Modal, title="팀원에게 전할 이야기"):
             messages = game.team_messages.setdefault(self.day, [])
             messages.append((self.actor, text))
             del messages[:-50]
-            await update_team_windows(game)
             await interaction.edit_original_response(content="팀원들에게 이야기를 전했어요.")
+            game.private_recipients[interaction.user.id] = interaction
+            await update_team_windows(game, repost=True)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         print(f"Mafia team message failed ({type(error).__name__}).", flush=True)

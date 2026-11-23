@@ -246,7 +246,7 @@ class MafiaTests(unittest.TestCase):
         for player in game.players.values():
             player.owner_id = player.player_id + 100
         game.players[2].connected_day = 1
-        windows = [S(edit=AsyncMock()) for _ in range(2)]
+        windows = [S(edit=AsyncMock(), delete=AsyncMock()) for _ in range(2)]
         def interaction(actor, window):
             return S(user=S(id=game.players[actor].owner_id),
                      response=S(defer=AsyncMock(), send_message=AsyncMock(), send_modal=AsyncMock()),
@@ -267,10 +267,13 @@ class MafiaTests(unittest.TestCase):
         modal = first.response.send_modal.call_args.args[0]
         modal.text._value = "이번에는 P4를 노릴게."
         run(modal.on_submit(first))
-        for window in windows:
-            text = window.edit.call_args.kwargs["content"]
+        for receiver in (first, second):
+            text = receiver.followup.send.call_args.args[0]
             self.assertIn("P1", text)
             self.assertIn("P4", text)
+            self.assertTrue(receiver.followup.send.call_args.kwargs["ephemeral"])
+        for window in windows:
+            window.delete.assert_awaited_once()
         self.assertEqual(game.team_messages[1], [(1, "이번에는 P4를 노릴게.")])
         run(modal.on_submit(outsider))
         self.assertEqual(len(game.team_messages[1]), 1)
@@ -832,6 +835,34 @@ class MafiaTests(unittest.TestCase):
         game.phase = "종료"
         self.assertIn("마피아", game.render())
         self.assertIn("영매", game.render())
+
+    def test_team_chat_repost_sends_new_private_window_before_deleting_old(self):
+        game = fixture(["마피아", "스파이", "경찰", "의사"])
+        m.sessions[10] = game
+        game.players[1].owner_id = 99
+        game.players[2].owner_id = 100
+        game.players[2].connected_day = 1
+        order = []
+        first_old = S(edit=AsyncMock(), delete=AsyncMock(side_effect=lambda: order.append("delete")))
+        second_old = S(edit=AsyncMock(), delete=AsyncMock())
+        first_new, second_new = S(edit=AsyncMock(), delete=AsyncMock()), S(edit=AsyncMock(), delete=AsyncMock())
+        def send_first(*args, **kwargs):
+            order.append("send")
+            return first_new
+        first = S(followup=S(send=AsyncMock(side_effect=send_first)))
+        second = S(followup=S(send=AsyncMock(return_value=second_new)))
+        game.private_recipients = {99: first, 100: second}
+        game.team_windows = {1: (1, first_old), 2: (1, second_old)}
+        run(m.update_team_windows(game, repost=True))
+        self.assertEqual(order, ["send", "delete"])
+        self.assertIs(game.team_windows[1][1], first_new)
+        self.assertIs(game.team_windows[2][1], second_new)
+        self.assertTrue(first.followup.send.call_args.kwargs["ephemeral"])
+        self.assertTrue(first.followup.send.call_args.kwargs["wait"])
+        game.private_recipients[99] = S(followup=S(send=AsyncMock(side_effect=OSError)))
+        run(m.update_team_windows(game, repost=True))
+        self.assertIs(game.team_windows[1][1], first_new)
+        first_new.edit.assert_awaited_once()
 
 
 class TimerSchedulingTests(unittest.TestCase):

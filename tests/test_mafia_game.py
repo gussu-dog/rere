@@ -130,7 +130,8 @@ class MafiaTests(unittest.TestCase):
             panel = object.__new__(m.GameView)
             panel.game, panel.revision = game, game.revision
             run(panel.callback_for("내 역할 / 결과", 2)(interaction))
-            self.assertIn("경찰", interaction.response.send_message.call_args.args[0])
+            self.assertIn("P2", interaction.response.send_message.call_args.args[0])
+            self.assertNotIn("경찰", interaction.response.send_message.call_args.args[0])
             run(panel.callback_for("내 역할 / 결과", 4)(interaction))
             self.assertNotIn("기자", interaction.response.send_message.call_args.args[0])
         m.sessions.clear()
@@ -298,7 +299,7 @@ class MafiaTests(unittest.TestCase):
         game = fixture(["마피아", "경찰", "의사", "스파이", "해커", "군인"])
         m.sessions[10] = game
         panel = m.GameView(game)
-        self.assertEqual([b.label for b in panel.children], ["내 역할 / 결과", "행동", "게임 종료"])
+        self.assertEqual([b.label for b in panel.children], ["내 단서 / 결과", "행동", "게임 종료"])
         self.assertNotIn("공격 선택", game.render())
         mafia = m.CharacterActionView(panel, game.players[1]).children
         citizen = m.CharacterActionView(panel, game.players[2]).children
@@ -306,21 +307,21 @@ class MafiaTests(unittest.TestCase):
         hacker = m.CharacterActionView(panel, game.players[5]).children
         self.assertEqual(len(mafia), 1)
         self.assertIsInstance(mafia[0], m.TargetSelect)
-        self.assertEqual(mafia[0].kind, "attack")
+        self.assertEqual(mafia[0].kind, "hidden")
         self.assertEqual(len(citizen), 1)
         self.assertIsInstance(citizen[0], m.TargetSelect)
-        self.assertEqual(citizen[0].kind, "action")
+        self.assertEqual(citizen[0].kind, "hidden")
         self.assertEqual(len(spy), 1)
         self.assertIsInstance(spy[0], m.TargetSelect)
-        self.assertEqual(spy[0].kind, "contact")
+        self.assertEqual(spy[0].kind, "hidden")
         self.assertEqual(len(hacker), 1)
-        self.assertEqual(hacker[0].kind, "action")
+        self.assertEqual(hacker[0].kind, "hidden")
         game.players[4].connected_day = 1
-        self.assertIn("마피아 공격", [b.label for b in m.CharacterActionView(panel, game.players[4]).children])
-        self.assertIn("팀 대화", [b.label for b in m.CharacterActionView(panel, game.players[1]).children])
-        self.assertIn("팀 대화", [b.label for b in m.CharacterActionView(panel, game.players[4]).children])
+        self.assertEqual(m.CharacterActionView(panel, game.players[4]).children[0].kind, "hidden")
+        self.assertIn("팀 대화", [getattr(b, "label", None) for b in m.CharacterActionView(panel, game.players[1]).children])
+        self.assertIn("팀 대화", [getattr(b, "label", None) for b in m.CharacterActionView(panel, game.players[4]).children])
         game.players[4].alive = False
-        self.assertEqual(m.CharacterActionView(panel, game.players[1]).children[0].kind, "attack")
+        self.assertEqual(m.CharacterActionView(panel, game.players[1]).children[0].kind, "hidden")
         game.players[4].alive = True
         game.phase = "투표"
         self.assertEqual(m.CharacterActionView(panel, game.players[1]).children[0].kind, "vote")
@@ -346,7 +347,7 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual(interaction.followup.send.await_count, 2)
         self.assertTrue(all(call.kwargs["ephemeral"] for call in interaction.followup.send.call_args_list))
         cards = interaction.followup.send.call_args_list
-        self.assertEqual(cards[0].kwargs["view"].children[0].kind, "attack")
+        self.assertEqual(cards[0].kwargs["view"].children[0].kind, "hidden")
         self.assertNotIn("마피아 공격", [getattr(b, "label", None) for b in cards[1].kwargs["view"].children])
         game.revision += 1
         run(cards[0].kwargs["view"].interaction_check(interaction))
@@ -626,8 +627,8 @@ class MafiaTests(unittest.TestCase):
         mafia = game.players[1]
         mafia.skill_values = {"사격 | 권총": 25}
         alone = m.role_details(game, mafia)
-        self.assertIn("공격 성공률 45%", alone)
-        self.assertEqual(alone.count("성공률"), 1)
+        self.assertNotIn("마피아", alone)
+        self.assertNotIn("성공률", alone)
         self.assertNotIn("접선한 동료", alone)
         game.players[2].connected_day = 1
         self.assertIn("접선한 동료 · P2", m.role_details(game, mafia))
@@ -635,11 +636,11 @@ class MafiaTests(unittest.TestCase):
         spy = game.players[2]
         spy.skill_values = {"은밀행동": 80, "사격 | 권총": 20}
         connected = m.role_details(game, spy)
-        self.assertIn("공격 성공률 42%", connected)
-        self.assertEqual(connected.count("성공률"), 1)
+        self.assertNotIn("스파이", connected)
+        self.assertNotIn("성공률", connected)
         self.assertIn("접선한 동료 · P1", connected)
         spy.connected_day = 0
-        self.assertIn("능력 성공률 78%", m.role_details(game, spy))
+        self.assertNotIn("성공률", m.role_details(game, spy))
         self.assertNotIn("접선한 동료", m.role_details(game, spy))
 
     def test_team_chat_closes_when_only_one_connected_player_survives(self):
@@ -761,6 +762,76 @@ class MafiaTests(unittest.TestCase):
         game.players[3].alive = True
         run(modal.on_submit(interaction))
         self.assertEqual(game.players[3].last_words, "한 명의 말만 믿지 마.")
+
+    def test_hidden_roles_use_the_same_options_and_short_failure_clues(self):
+        game = fixture(["마피아", "경찰", "의사", "스파이", "기자", "군인", "영매"])
+        game.players[6].alive = False
+        panel = m.GameView(game)
+        expected = None
+        for player in game.alive():
+            select = m.CharacterActionView(panel, player).children[0]
+            self.assertEqual(select.kind, "hidden")
+            options = [(option.value, option.label) for option in select.options]
+            if expected is None:
+                expected = options
+            self.assertEqual(options, expected)
+            card = m.role_details(game, player, results=False)
+            self.assertNotIn(player.role, card)
+            self.assertNotIn("성공률", card)
+        with patch.object(m.random, "randint", return_value=100):
+            for player in game.alive():
+                self.assertFalse(game.check(player))
+                self.assertEqual(player.inbox[-1], m.FAILURE_HINTS[player.role])
+                self.assertLessEqual(len(player.inbox[-1]), 25)
+        self.assertEqual(m.FAILURE_HINTS["경찰"], m.FAILURE_HINTS["기자"])
+        self.assertEqual(m.FAILURE_HINTS["탐정"], m.FAILURE_HINTS["기자"])
+        self.assertEqual(m.FAILURE_HINTS["스파이"], m.FAILURE_HINTS["해커"])
+
+    def test_hidden_choices_route_to_real_abilities_and_wait_for_every_character(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.night_selections = {}
+        game.prepare_night()
+        game.choose_night_target(1, 2)
+        self.assertEqual(game.attacks, {1: 2})
+        game.choose_night_target(2, 1)
+        game.choose_night_target(3, 3)
+        self.assertEqual(game.actions[3], 3)
+        self.assertFalse(game.all_choices_ready())
+        game.choose_night_target(4, 2)
+        self.assertTrue(game.all_choices_ready())
+        game.resolve_night()
+        self.assertTrue(game.players[2].alive)
+        self.assertTrue(game.players[4].used)
+        game.votes = {p.player_id: None for p in game.alive()}
+        game.resolve_vote()
+        self.assertEqual(game.night_selections, {})
+
+    def test_hidden_invalid_target_preserves_secret_and_timeout_choices_are_valid(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.night_selections = {}
+        game.prepare_night()
+        game.choose_night_target(1, 1)
+        self.assertIn(1, game.invalid_selections)
+        self.assertIsNone(game.attacks[1])
+        with patch.object(m.random, "choice", side_effect=lambda values: values[0]):
+            game.fill_missing_night_choices()
+        self.assertTrue(game.all_choices_ready())
+        game.resolve_night()
+        self.assertIn("공격이 빗나갔어요.", game.players[1].inbox)
+        for player in game.players.values():
+            self.assertTrue(player.alive)
+
+    def test_game_start_activates_hidden_choices_and_roles_reveal_only_at_ending(self):
+        game = fixture([""] * 4)
+        with patch.object(m.random, "sample", return_value=["영매"]), patch.object(m.random, "shuffle"):
+            game.start()
+        self.assertEqual(game.night_selections, {})
+        self.assertFalse(game.all_choices_ready())
+        self.assertNotIn("경찰", game.render())
+        self.assertNotIn("영매", game.render())
+        game.phase = "종료"
+        self.assertIn("마피아", game.render())
+        self.assertIn("영매", game.render())
 
 
 class TimerSchedulingTests(unittest.TestCase):

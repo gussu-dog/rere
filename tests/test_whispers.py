@@ -28,7 +28,7 @@ class WhisperTests(unittest.TestCase):
     def test_saved_messages_survive_reopening_and_only_recipient_can_read(self):
         self.store.save(10, 99, "Sender", "Only the recipient can see this")
         reopened = w.WhisperStore(self.path)
-        self.assertEqual(reopened.read(10), (99, "Sender", "Only the recipient can see this", ""))
+        self.assertEqual(reopened.read(10), (99, "Sender", "Only the recipient can see this", "", None))
         view = w.WhisperReadView(reopened)
         self.assertTrue(view.is_persistent())
         interaction = S(user=S(id=100), message=S(id=10),
@@ -52,7 +52,7 @@ class WhisperTests(unittest.TestCase):
         public = interaction.channel.send.call_args.args[0]
         self.assertIn("<@99>", public)
         self.assertNotIn("Private text", public)
-        self.assertEqual(self.store.read(10), (99, "Sender", "Private text", "https://example.com/avatar.png"))
+        self.assertEqual(self.store.read(10), (99, "Sender", "Private text", "https://example.com/avatar.png", 1))
         self.assertIsInstance(interaction.channel.send.call_args.kwargs["view"], w.WhisperReadView)
         announcement.edit.assert_not_awaited()
         self.assertTrue(interaction.response.defer.call_args.kwargs["ephemeral"])
@@ -73,6 +73,18 @@ class WhisperTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as database, database:
             database.execute("CREATE TABLE whispers (message_id INTEGER PRIMARY KEY, recipient_id INTEGER NOT NULL, sender TEXT NOT NULL, content TEXT NOT NULL)")
             database.execute("INSERT INTO whispers VALUES (1, 99, 'Old sender', 'Old message')")
-        self.assertEqual(self.store.read(1), (99, "Old sender", "Old message", ""))
+        self.assertEqual(self.store.read(1), (99, "Old sender", "Old message", "", None))
         self.store.save(2, 99, "New sender", "New message", "https://example.com/avatar.png")
         self.assertEqual(self.store.read(2)[3], "https://example.com/avatar.png")
+
+    def test_sender_can_read_after_reopening_but_other_users_cannot(self):
+        self.store.save(10, 99, "Same name", "Secret", sender_id=1)
+        view = w.WhisperReadView(w.WhisperStore(self.path))
+        for user_id, allowed in ((1, True), (99, True), (100, False)):
+            interaction = S(user=S(id=user_id), message=S(id=10),
+                            response=S(defer=AsyncMock()), followup=S(send=AsyncMock()))
+            with patch.object(w.asyncio, "to_thread", immediate):
+                run(view.read.callback(interaction))
+            response = interaction.followup.send.call_args.kwargs
+            self.assertEqual("embed" in response, allowed)
+            self.assertTrue(response["ephemeral"])

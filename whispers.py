@@ -13,7 +13,7 @@ class WhisperStore:
     def __init__(self, path: Path):
         self.path = path
 
-    def save(self, message_id: int, recipient_id: int, sender: str, content: str, avatar_url: str = "") -> None:
+    def save(self, message_id: int, recipient_id: int, sender: str, content: str, avatar_url: str = "", sender_id: int | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path)) as database, database:
             database.execute(
@@ -23,17 +23,20 @@ class WhisperStore:
             columns = {row[1] for row in database.execute("PRAGMA table_info(whispers)")}
             if "avatar_url" not in columns:
                 database.execute("ALTER TABLE whispers ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
-            database.execute("INSERT INTO whispers (message_id, recipient_id, sender, content, avatar_url) VALUES (?, ?, ?, ?, ?)",
-                             (message_id, recipient_id, sender, content, avatar_url))
+            if "sender_id" not in columns:
+                database.execute("ALTER TABLE whispers ADD COLUMN sender_id INTEGER")
+            database.execute("INSERT INTO whispers (message_id, recipient_id, sender, content, avatar_url, sender_id) VALUES (?, ?, ?, ?, ?, ?)",
+                             (message_id, recipient_id, sender, content, avatar_url, sender_id))
 
-    def read(self, message_id: int) -> tuple[int, str, str, str] | None:
+    def read(self, message_id: int) -> tuple[int, str, str, str, int | None] | None:
         if not self.path.exists():
             return None
         with closing(sqlite3.connect(self.path)) as database:
             columns = {row[1] for row in database.execute("PRAGMA table_info(whispers)")}
             avatar = "avatar_url" if "avatar_url" in columns else "''"
+            sender_id = "sender_id" if "sender_id" in columns else "NULL"
             return database.execute(
-                f"SELECT recipient_id, sender, content, {avatar} FROM whispers WHERE message_id = ?", (message_id,)
+                f"SELECT recipient_id, sender, content, {avatar}, {sender_id} FROM whispers WHERE message_id = ?", (message_id,)
             ).fetchone()
 
 
@@ -53,9 +56,9 @@ class WhisperReadView(discord.ui.View):
         if record is None:
             await interaction.followup.send(ephemeral=True, content="저장된 비밀메시지를 찾지 못했어요.")
             return
-        recipient_id, sender, content, avatar_url = record
-        if interaction.user.id != recipient_id:
-            await interaction.followup.send(ephemeral=True, content="이 비밀메시지는 받는 사람만 확인할 수 있어요!")
+        recipient_id, sender, content, avatar_url, sender_id = record
+        if interaction.user.id not in (recipient_id, sender_id):
+            await interaction.followup.send(ephemeral=True, content="이 비밀메시지는 보낸 사람과 받는 사람만 확인할 수 있어요!")
             return
         card = discord.Embed(description=content)
         card.set_author(name=sender, icon_url=avatar_url or None)
@@ -79,7 +82,7 @@ async def send_whisper(interaction: discord.Interaction, store: WhisperStore, re
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
                                                      users=[discord.Object(id=recipient_id)]),
         )
-        await asyncio.to_thread(store.save, announcement.id, recipient_id, interaction.user.display_name, content, str(interaction.user.display_avatar.url))
+        await asyncio.to_thread(store.save, announcement.id, recipient_id, interaction.user.display_name, content, str(interaction.user.display_avatar.url), interaction.user.id)
     except (discord.HTTPException, OSError, sqlite3.Error) as error:
         print(f"Whisper delivery failed ({type(error).__name__}).", flush=True)
         if announcement is not None:

@@ -114,6 +114,9 @@ class Game:
         return player.alive and (player.role == "마피아" or
             player.role in {"스파이", "해커"} and 0 < player.connected_day <= self.day)
 
+    def team_chat_available(self, player: Player) -> bool:
+        return self.team_access(player) and sum(self.team_access(p) for p in self.alive()) >= 2
+
     def can_attack(self, player: Player) -> bool:
         return player.alive and (player.role == "마피아" or player.role == "스파이" and self.team_access(player))
 
@@ -651,7 +654,7 @@ def team_chat_text(game: Game, day: int) -> str:
 def chat_allowed(game: Game, owner_id: int, actor: int, day: int) -> bool:
     player = game.players.get(actor)
     return (sessions.get(game.channel_id) is game and game.phase == "밤" and game.day == day
-            and (not game.deadline or time.time() < game.deadline) and player is not None and player.owner_id == owner_id and game.team_access(player))
+            and (not game.deadline or time.time() < game.deadline) and player is not None and player.owner_id == owner_id and game.team_chat_available(player))
 
 
 async def update_team_windows(game: Game) -> None:
@@ -674,7 +677,7 @@ async def open_team_chat(interaction: discord.Interaction, game: Game, actor: in
     await interaction.response.defer()
     async with game.lock:
         if not chat_allowed(game, interaction.user.id, actor, game.day):
-            await interaction.followup.send("밤에 생존한 마피아와 접선한 동료만 팀 대화를 열 수 있어요.", ephemeral=True)
+            await interaction.followup.send("접선한 생존 팀원이 두 명 이상일 때 밤에 팀 대화를 열 수 있어요.", ephemeral=True)
             return
         game.private_recipients[interaction.user.id] = interaction
         previous = game.team_windows.pop(actor, None)
@@ -774,10 +777,10 @@ class CharacterActionView(MafiaView):
             labels = [] if passive else [("밤 행동", "밤 행동")]
         if game.phase == "밤" and game.can_attack(player):
             labels.append(("마피아 공격", "마피아 공격"))
-        if game.phase == "밤" and game.team_access(player):
+        if game.phase == "밤" and game.team_chat_available(player):
             labels.append(("팀 대화", "팀 대화"))
-        if len(labels) == 1 and labels[0][1] in {"투표", "밤 행동", "접선"}:
-            kind = {"투표": "vote", "밤 행동": "action", "접선": "contact"}[labels[0][1]]
+        if len(labels) == 1 and labels[0][1] in {"투표", "밤 행동", "접선", "마피아 공격"}:
+            kind = {"투표": "vote", "밤 행동": "action", "접선": "contact", "마피아 공격": "attack"}[labels[0][1]]
             self.add_item(TargetSelect(game, player.player_id, kind))
             return
         for title, action in labels:

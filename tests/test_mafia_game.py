@@ -300,12 +300,13 @@ class MafiaTests(unittest.TestCase):
         panel = m.GameView(game)
         self.assertEqual([b.label for b in panel.children], ["내 역할 / 결과", "행동", "게임 종료"])
         self.assertNotIn("공격 선택", game.render())
-        mafia = [b.label for b in m.CharacterActionView(panel, game.players[1]).children]
+        mafia = m.CharacterActionView(panel, game.players[1]).children
         citizen = m.CharacterActionView(panel, game.players[2]).children
         spy = m.CharacterActionView(panel, game.players[4]).children
         hacker = m.CharacterActionView(panel, game.players[5]).children
-        self.assertIn("마피아 공격", mafia)
-        self.assertIn("팀 대화", mafia)
+        self.assertEqual(len(mafia), 1)
+        self.assertIsInstance(mafia[0], m.TargetSelect)
+        self.assertEqual(mafia[0].kind, "attack")
         self.assertEqual(len(citizen), 1)
         self.assertIsInstance(citizen[0], m.TargetSelect)
         self.assertEqual(citizen[0].kind, "action")
@@ -316,6 +317,11 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual(hacker[0].kind, "action")
         game.players[4].connected_day = 1
         self.assertIn("마피아 공격", [b.label for b in m.CharacterActionView(panel, game.players[4]).children])
+        self.assertIn("팀 대화", [b.label for b in m.CharacterActionView(panel, game.players[1]).children])
+        self.assertIn("팀 대화", [b.label for b in m.CharacterActionView(panel, game.players[4]).children])
+        game.players[4].alive = False
+        self.assertEqual(m.CharacterActionView(panel, game.players[1]).children[0].kind, "attack")
+        game.players[4].alive = True
         game.phase = "투표"
         self.assertEqual(m.CharacterActionView(panel, game.players[1]).children[0].kind, "vote")
 
@@ -340,7 +346,7 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual(interaction.followup.send.await_count, 2)
         self.assertTrue(all(call.kwargs["ephemeral"] for call in interaction.followup.send.call_args_list))
         cards = interaction.followup.send.call_args_list
-        self.assertIn("마피아 공격", [b.label for b in cards[0].kwargs["view"].children])
+        self.assertEqual(cards[0].kwargs["view"].children[0].kind, "attack")
         self.assertNotIn("마피아 공격", [getattr(b, "label", None) for b in cards[1].kwargs["view"].children])
         game.revision += 1
         run(cards[0].kwargs["view"].interaction_check(interaction))
@@ -635,6 +641,23 @@ class MafiaTests(unittest.TestCase):
         spy.connected_day = 0
         self.assertIn("능력 성공률 78%", m.role_details(game, spy))
         self.assertNotIn("접선한 동료", m.role_details(game, spy))
+
+    def test_team_chat_closes_when_only_one_connected_player_survives(self):
+        game = fixture(["마피아", "스파이", "경찰", "의사"])
+        m.sessions[10] = game
+        self.assertFalse(game.team_chat_available(game.players[1]))
+        game.players[2].connected_day = game.day + 1
+        self.assertFalse(game.team_chat_available(game.players[1]))
+        game.players[2].connected_day = game.day
+        self.assertTrue(game.team_chat_available(game.players[1]))
+        first, second = S(edit=AsyncMock()), S(edit=AsyncMock())
+        game.team_windows = {1: (game.day, first), 2: (game.day, second)}
+        game.players[2].alive = False
+        self.assertFalse(m.chat_allowed(game, game.players[1].owner_id, 1, game.day))
+        run(m.update_team_windows(game))
+        self.assertFalse(game.team_windows)
+        self.assertIsNone(first.edit.call_args.kwargs["view"])
+        self.assertIsNone(second.edit.call_args.kwargs["view"])
 
 
 class TimerSchedulingTests(unittest.TestCase):

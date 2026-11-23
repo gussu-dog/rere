@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import whispers
 import mafia_game
 import kitchen_raid as kitchen
 
@@ -6528,6 +6529,7 @@ async def main() -> None:
         await registry.close()
 
 
+whispers.install(bot, registry.selections_path.parent)
 mafia_game.install(bot, registry)
 kitchen.bind(globals())
 

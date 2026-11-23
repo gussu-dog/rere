@@ -72,26 +72,23 @@ async def send_whisper(interaction: discord.Interaction, store: WhisperStore, re
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
     announcement = None
-    saved = False
     try:
         announcement = await interaction.channel.send(
             f"<@{recipient_id}>님에게 비밀메시지가 도착했어요!",
+            view=WhisperReadView(store),
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
                                                      users=[discord.Object(id=recipient_id)]),
         )
         await asyncio.to_thread(store.save, announcement.id, recipient_id, interaction.user.display_name, content, str(interaction.user.display_avatar.url))
-        saved = True
-        await announcement.edit(view=WhisperReadView(store))
     except (discord.HTTPException, OSError, sqlite3.Error) as error:
         print(f"Whisper delivery failed ({type(error).__name__}).", flush=True)
-        if announcement is not None and not saved:
+        if announcement is not None:
             try:
                 await announcement.delete()
             except (discord.HTTPException, OSError):
                 pass
         await interaction.edit_original_response(
-            content="메시지는 저장했지만 확인 버튼을 표시하지 못했어요. 잠시 후 다시 보내 주세요."
-            if saved else "비밀메시지를 보내지 못했어요. 잠시 후 다시 시도해 주세요."
+            content="비밀메시지를 보내지 못했어요. 잠시 후 다시 시도해 주세요."
         )
         return
     await interaction.edit_original_response(content="비밀메시지를 전했어요!")

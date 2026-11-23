@@ -53,7 +53,8 @@ class WhisperTests(unittest.TestCase):
         self.assertIn("<@99>", public)
         self.assertNotIn("Private text", public)
         self.assertEqual(self.store.read(10), (99, "Sender", "Private text", "https://example.com/avatar.png"))
-        self.assertIsInstance(announcement.edit.call_args.kwargs["view"], w.WhisperReadView)
+        self.assertIsInstance(interaction.channel.send.call_args.kwargs["view"], w.WhisperReadView)
+        announcement.edit.assert_not_awaited()
         self.assertTrue(interaction.response.defer.call_args.kwargs["ephemeral"])
 
     def test_failed_storage_removes_unreadable_announcement(self):

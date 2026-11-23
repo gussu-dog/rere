@@ -453,60 +453,54 @@ class MafiaTests(unittest.TestCase):
         self.assertEqual(game.attacks, {1: 3, 2: 3})
 
 
-    def test_day_action_cards_open_per_character_modal_and_publish_only_dialogue(self):
-        game = fixture(["마피아", "경찰", "의사", "군인"])
-        game.phase = "토론"
-        game.players[1].owner_id = game.players[2].owner_id = 99
-        m.sessions[10] = game
-        game.message = S(channel=S(send=AsyncMock()))
-        interaction = S(user=S(id=99), response=S(defer=AsyncMock(), send_message=AsyncMock(), send_modal=AsyncMock()),
-                        followup=S(send=AsyncMock()), edit_original_response=AsyncMock())
-        panel = m.GameView(game)
-        self.assertFalse(next(b for b in panel.children if b.label == "행동").disabled)
-        run(panel.callback_for("행동")(interaction))
-        cards = interaction.followup.send.call_args_list
-        self.assertEqual(len(cards), 2)
-        for call in cards:
-            self.assertTrue(call.kwargs["ephemeral"])
-            self.assertEqual([b.label for b in call.kwargs["view"].children], ["대화하기"])
-        run(cards[1].kwargs["view"].children[0].callback(interaction))
-        modal = interaction.response.send_modal.call_args.args[0]
-        modal.text._value = "저는 어젯밤 P1을 조사했어요."
-        run(modal.on_submit(interaction))
-        output = game.message.channel.send.call_args.args[0]
-        self.assertEqual(output, m.code_box("P2: 저는 어젯밤 P1을 조사했어요."))
-        self.assertNotIn("경찰", output)
-        self.assertNotIn("ephemeral", game.message.channel.send.call_args.kwargs)
-        self.assertIsInstance(game.message.channel.send.call_args.kwargs["allowed_mentions"], m.discord.AllowedMentions)
 
-    def test_day_modal_rejects_wrong_owner_dead_empty_late_and_old_round(self):
+    def test_day_uses_normal_chat_and_unanimous_extension_counts_users_once(self):
         game = fixture(["마피아", "경찰", "의사", "군인"])
-        game.phase = "토론"
-        game.players[2].owner_id = 99
+        game.phase, game.deadline = "토론", 1000
         m.sessions[10] = game
-        game.message = S(channel=S(send=AsyncMock()))
-        interaction = S(user=S(id=99), response=S(defer=AsyncMock()),
-                        edit_original_response=AsyncMock())
-        modal = m.DayMessageModal(game, 2)
-        modal.text._value = " "
-        run(modal.on_submit(interaction))
-        modal.text._value = "말할게요."
-        interaction.user.id = 100
-        run(modal.on_submit(interaction))
-        interaction.user.id = 99
-        game.players[2].alive = False
-        run(modal.on_submit(interaction))
-        game.players[2].alive = True
-        game.phase = "밤"
-        run(modal.on_submit(interaction))
-        game.phase = "토론"
-        game.deadline = 10
-        with patch.object(m.time, "time", return_value=11):
-            run(modal.on_submit(interaction))
-        game.deadline = 0
-        game.revision += 1
-        run(modal.on_submit(interaction))
-        game.message.channel.send.assert_not_awaited()
+        game.players[1].owner_id = game.players[2].owner_id = 99
+        game.players[3].owner_id = game.players[4].owner_id = 100
+        def interaction(uid):
+            return S(user=S(id=uid), response=S(defer=AsyncMock(), send_message=AsyncMock()))
+        panel = m.GameView(game)
+        self.assertTrue(next(b for b in panel.children if b.label == "행동").disabled)
+        self.assertFalse(hasattr(m, "DayMessageModal"))
+        with patch.object(m, "refresh", AsyncMock()), patch.object(m.time, "time", return_value=100):
+            run(panel.callback_for("토론 연장")(interaction(99)))
+            self.assertEqual(game.extension_votes, {99: True})
+            self.assertEqual(game.deadline, 1000)
+            vote_panel = m.GameView(game)
+            run(vote_panel.callback_for("연장 찬성")(interaction(100)))
+            self.assertIsNone(game.extension_votes)
+            self.assertEqual(game.deadline, 1060)
+            self.assertEqual(game.extension_seconds, 60)
+            m.set_phase_timer.assert_called_once_with(game, deadline=1060)
+            self.assertIn("전원 찬성", game.render())
+
+    def test_extension_veto_stale_poll_and_spectator(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase, game.deadline = "토론", 1000
+        for actor, p in game.players.items():
+            p.owner_id = actor
+        m.sessions[10] = game
+        def interaction(uid):
+            return S(user=S(id=uid), response=S(defer=AsyncMock(), send_message=AsyncMock()))
+        with patch.object(m, "refresh", AsyncMock()), patch.object(m.time, "time", return_value=100):
+            outsider = interaction(99)
+            run(m.GameView(game).callback_for("토론 연장")(outsider))
+            self.assertIsNone(game.extension_votes)
+            run(m.GameView(game).callback_for("토론 연장")(interaction(1)))
+            first_poll = m.GameView(game)
+            run(first_poll.callback_for("연장 반대")(interaction(2)))
+            self.assertIsNone(game.extension_votes)
+            self.assertEqual(game.deadline, 1000)
+            run(m.GameView(game).callback_for("토론 연장")(interaction(1)))
+            run(first_poll.callback_for("연장 찬성")(interaction(2)))
+            self.assertEqual(game.extension_votes, {1: True})
+            run(m.finish_phase(game))
+            self.assertEqual(game.phase, "투표")
+            self.assertIsNone(game.extension_votes)
+
 
 
 class TimerSchedulingTests(unittest.TestCase):

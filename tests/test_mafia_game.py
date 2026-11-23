@@ -956,7 +956,7 @@ class MafiaTests(unittest.TestCase):
         game.phase = "투표"
         game.votes = {1: 2, 2: 3, 3: 2}
         game.resolve_vote()
-        self.assertEqual(game.vote_summary, ["P2 · 2표", "P3 · 1표", "P1 · 0표", "P4 · 0표", "기권 · 1표"])
+        self.assertEqual(game.vote_summary, ["P2 · 2표", "P3 · 1표", "기권 · 1표"])
         self.assertIn("득표 결과", game.render())
         with patch.object(m, "refresh", AsyncMock()):
             run(m.finish_phase(game, expired=True))
@@ -974,7 +974,8 @@ class MafiaTests(unittest.TestCase):
             game.resolve_vote()
             self.assertEqual(game.phase, "밤")
             self.assertIn("득표 결과", game.render())
-            self.assertEqual(len(game.vote_summary), 5)
+            self.assertFalse(any(" · 0표" in line for line in game.vote_summary))
+            self.assertEqual(len(game.vote_summary), 3 if any(" · 1표" in line for line in game.vote_summary) else 1)
 
 
 

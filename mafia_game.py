@@ -374,9 +374,10 @@ class Game:
         counts = Counter(v for v in self.votes.values() if v is not None)
         victim = unique_most_voted([v for v in self.votes.values() if v is not None])
         self.vote_summary = [f"{p.name} · {counts[p.player_id]}표" for p in
-                             sorted(self.alive(), key=lambda p: -counts[p.player_id])]
+                             sorted(self.alive(), key=lambda p: -counts[p.player_id]) if counts[p.player_id] > 0]
         abstentions = sum(self.votes.get(p.player_id) is None for p in self.alive())
-        self.vote_summary.append(f"기권 · {abstentions}표")
+        if abstentions:
+            self.vote_summary.append(f"기권 · {abstentions}표")
         self.news = []
         if victim is None:
             self.news.append("최다 득표가 동률이거나 모두 기권해서 처형하지 않았어요.")

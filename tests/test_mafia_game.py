@@ -197,16 +197,16 @@ class MafiaTests(unittest.TestCase):
 
     def test_skill_rates_and_attack_uses_best_firearm(self):
         game = fixture(["마피아", "경찰", "의사", "군인"])
-        for value, expected in [(0, 30), (20, 42), (50, 60), (80, 78), (100, 90), (150, 90)]:
+        for value, expected in [(0, 50), (20, 62), (50, 80), (80, 90), (100, 90), (150, 90)]:
             game.players[1].skill_values = {"사격 | 권총": value, "사격 | 라/산": 0}
             self.assertEqual(game.success_rate(game.players[1], attack=True), expected)
         game.players[1].skill_values = {"사격 | 권총": 40, "사격 | 라/산": 80}
-        self.assertEqual(game.success_rate(game.players[1], attack=True), 78)
+        self.assertEqual(game.success_rate(game.players[1], attack=True), 90)
         game.players[3].skill_values = {"응급처치": 30, "의료": 70}
-        self.assertEqual(game.success_rate(game.players[3]), 72)
+        self.assertEqual(game.success_rate(game.players[3]), 90)
         game.players[2].skill_values = {"과학 | 수사과학": 80, "추적": 20, "관찰력": 50}
-        self.assertEqual(game.success_rate(game.players[2]), 78)
-        with patch.object(m.random, "randint", return_value=79):
+        self.assertEqual(game.success_rate(game.players[2]), 90)
+        with patch.object(m.random, "randint", return_value=91):
             self.assertFalse(game.check(game.players[2]))
 
     def test_contact_is_hidden_until_success_and_starts_next_night(self):
@@ -686,7 +686,7 @@ class MafiaTests(unittest.TestCase):
         medium = game.players[4]
         self.assertTrue(game.needs_night_action(medium))
         medium.skill_values = {"정신": 80}
-        self.assertEqual(game.success_rate(medium), 78)
+        self.assertEqual(game.success_rate(medium), 90)
         game.players[2].alive = False
         self.assertIn(2, m.target_candidates(game, 4, "action"))
         self.assertNotIn(2, m.target_candidates(game, 3, "action"))

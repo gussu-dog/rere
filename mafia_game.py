@@ -228,7 +228,7 @@ class Game:
         skills = {"사격"} if attack else ROLE_SKILLS[player.role]
         value = max((value for name, value in player.skill_values.items()
                      if any(part.strip() in skills for part in name.replace("(", "|").replace(")", "").split("|"))), default=0)
-        return min(90, 30 + max(0, value) * 3 // 5)
+        return min(90, 50 + max(0, value) * 3 // 5)
 
     def check(self, player: Player, *, attack: bool = False, automatic: bool = False) -> bool:
         rate = self.success_rate(player, attack=attack)
@@ -1396,7 +1396,7 @@ def install(bot, registry) -> None:
                 "영매 [정신력/오컬트] (시민팀)",
                 "사망자의 유언 청취. 생존자 곁에 남은 사망자의 흔적 확인",
                 "",
-                "기능치 참조 최대 90% 확률",
+                "기본 50% + 기능치의 60% · 최대 90%",
                 "스파이와 해커는 마피아와 접선하면 추가능력이 해금됩니다.",
             ]
             await interaction.response.send_message(

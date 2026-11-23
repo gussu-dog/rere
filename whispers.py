@@ -39,20 +39,20 @@ class WhisperReadView(discord.ui.View):
 
     @discord.ui.button(label="확인하기", custom_id="rere:whisper:read", style=discord.ButtonStyle.primary)
     async def read(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         try:
             record = await asyncio.to_thread(self.store.read, interaction.message.id)
         except sqlite3.Error:
-            await interaction.edit_original_response(content="비밀메시지를 읽지 못했어요. 잠시 후 다시 눌러 주세요.")
+            await interaction.followup.send(ephemeral=True, content="비밀메시지를 읽지 못했어요. 잠시 후 다시 눌러 주세요.")
             return
         if record is None:
-            await interaction.edit_original_response(content="저장된 비밀메시지를 찾지 못했어요.")
+            await interaction.followup.send(ephemeral=True, content="저장된 비밀메시지를 찾지 못했어요.")
             return
         recipient_id, sender, content = record
         if interaction.user.id != recipient_id:
-            await interaction.edit_original_response(content="이 비밀메시지는 받는 사람만 확인할 수 있어요!")
+            await interaction.followup.send(ephemeral=True, content="이 비밀메시지는 받는 사람만 확인할 수 있어요!")
             return
-        await interaction.edit_original_response(
+        await interaction.followup.send(ephemeral=True,
             content=f"{discord.utils.escape_markdown(sender)}님으로부터 비밀메시지가 도착했어요!\n\n{content}",
             allowed_mentions=discord.AllowedMentions.none(),
         )

@@ -32,14 +32,14 @@ class WhisperTests(unittest.TestCase):
         view = w.WhisperReadView(reopened)
         self.assertTrue(view.is_persistent())
         interaction = S(user=S(id=100), message=S(id=10),
-                        response=S(defer=AsyncMock()), edit_original_response=AsyncMock())
+                        response=S(defer=AsyncMock()), followup=S(send=AsyncMock()))
         with patch.object(w.asyncio, "to_thread", immediate):
             run(view.read.callback(interaction))
-            self.assertNotIn("Only the recipient", interaction.edit_original_response.call_args.kwargs["content"])
+            self.assertNotIn("Only the recipient", interaction.followup.send.call_args.kwargs["content"])
             interaction.user.id = 99
             run(view.read.callback(interaction))
-            self.assertIn("Only the recipient", interaction.edit_original_response.call_args.kwargs["content"])
-            self.assertTrue(interaction.response.defer.call_args.kwargs["ephemeral"])
+            self.assertIn("Only the recipient", interaction.followup.send.call_args.kwargs["content"])
+            self.assertTrue(interaction.followup.send.call_args.kwargs["ephemeral"])
 
     def test_compose_keeps_body_out_of_public_announcement(self):
         modal = w.WhisperComposeModal(self.store, 1, "Sender", 99)

@@ -46,7 +46,7 @@ class MafiaTests(unittest.TestCase):
         game.actions = {1: None, 2: 1, 3: 1, 4: 4, 5: None, 6: 2}
         game.attacks = {5: 3}
         game.resolve_night()
-        self.assertIn("시민", game.players[2].inbox[-1])
+        self.assertIn("시민팀", game.players[2].inbox[-1])
         self.assertFalse(game.players[3].alive)
         self.assertTrue(game.players[3].used)
         self.assertTrue(any("스파이" in line for line in game.news))
@@ -62,7 +62,7 @@ class MafiaTests(unittest.TestCase):
         game = fixture(["해커", "경찰", "의사", "마피아", "탐정", "기자"])
         game.actions = {1: 2, 2: 1}
         game.resolve_night()
-        self.assertIn("시민", game.players[2].inbox[-1])
+        self.assertIn("시민팀", game.players[2].inbox[-1])
         self.assertFalse(any("방해" in line for line in game.players[2].inbox))
 
     def test_soldier_survives_once_doctor_protects_and_ties_skip(self):
@@ -941,7 +941,7 @@ class MafiaTests(unittest.TestCase):
             result = game.players[2].inbox[-1]
             self.assertFalse(any("방해" in line or "실패" in line for line in game.players[2].inbox))
             if role == "경찰":
-                self.assertIn("마피아", result)
+                self.assertIn("마피아팀", result)
             elif role == "탐정":
                 self.assertNotIn("아무도 없음", result)
             elif role == "기자":
@@ -1043,6 +1043,14 @@ class MafiaTests(unittest.TestCase):
         self.assertIn("탈落".replace("落", "락"), interaction.response.send_message.call_args.args[0])
         interaction.response.defer.assert_not_awaited()
         self.assertNotIn(2, game.actions)
+
+
+    def test_police_results_name_teams_not_roles(self):
+        for role, team in (("마피아", "마피아팀"), ("스파이", "시민팀"), ("해커", "마피아팀"), ("의사", "시민팀")):
+            game = fixture(["경찰", role, "의사", "군인"])
+            game.actions = {1: 2}
+            game.resolve_night()
+            self.assertIn(f"조사 결과는 {team}예요.", game.players[1].inbox[-1])
 
 
 

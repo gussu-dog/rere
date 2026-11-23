@@ -1031,6 +1031,15 @@ class CharacterActionView(MafiaView):
         return False
 
 
+class ExecutionVoteView(MafiaView):
+    def __init__(self, panel: GameView, player: Player):
+        super().__init__(timeout=None)
+        for label in ("처형 찬성", "처형 반대"):
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
+            button.callback = panel.callback_for(label, player.player_id)
+            self.add_item(button)
+
+
 class GameView(MafiaView):
     def __init__(self, game: Game):
         super().__init__(timeout=None)
@@ -1045,7 +1054,7 @@ class GameView(MafiaView):
             if game.discussion_votes is not None:
                 labels.extend(["찬성", "반대"])
         if game.phase == "처형 투표":
-            labels = ["내 단서 / 결과", "처형 찬성", "처형 반대", "게임 종료"]
+            labels = ["내 단서 / 결과", "처형 투표", "게임 종료"]
         if game.phase == "종료":
             labels = []
         for label in labels:
@@ -1161,6 +1170,24 @@ class GameView(MafiaView):
                             view=CharacterActionView(self, member), ephemeral=True,
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
+                    return
+                if label == "처형 투표":
+                    owned = [p for p in game.alive() if p.owner_id == interaction.user.id and p.player_id != game.nominee]
+                    if game.phase != "처형 투표" or not owned:
+                        await interaction.response.send_message("처형 투표에 참여할 캐릭터가 없어요.", ephemeral=True)
+                        return
+                    if game.deadline and time.time() >= game.deadline:
+                        await interaction.response.defer()
+                        await finish_phase(game, expired=True)
+                        return
+                    await interaction.response.defer()
+                    for member in owned:
+                        choice = game.execution_votes.get(member.player_id)
+                        status = "미투표" if choice is None else "찬성" if choice else "반대"
+                        await interaction.followup.send(
+                            code_box(f"{member.name} · 처형 투표\n현재 선택 · {status}"),
+                            view=ExecutionVoteView(self, member), ephemeral=True,
+                            allowed_mentions=discord.AllowedMentions.none())
                     return
                 player = game.players.get(player_id)
                 personal = {"내 역할 / 결과", "밤 행동", "마피아 공격", "투표", "접선", "팀 대화", "처형 찬성", "처형 반대"}

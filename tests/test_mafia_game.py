@@ -910,7 +910,7 @@ class MafiaTests(unittest.TestCase):
         interaction = S(user=S(id=42), response=S(send_message=AsyncMock(), defer=AsyncMock()),
                         followup=S(send=AsyncMock()))
         panel = m.GameView(game)
-        self.assertIn("처형 찬성", [b.label for b in panel.children])
+        self.assertIn("처형 투표", [b.label for b in panel.children])
         run(panel.callback_for("처형 찬성", 2)(interaction))
         self.assertEqual(game.execution_votes, {})
         with patch.object(m, "refresh", AsyncMock()):
@@ -982,6 +982,24 @@ class MafiaTests(unittest.TestCase):
             self.assertIn("득표 결과", game.render())
             self.assertFalse(any(" · 0표" in line for line in game.vote_summary))
             self.assertEqual(len(game.vote_summary), 3 if any(" · 1표" in line for line in game.vote_summary) else 1)
+
+
+    def test_execution_vote_opens_all_owned_choices_privately(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase, game.nominee = "처형 투표", 2
+        for p in game.players.values():
+            p.owner_id = 99
+        game.players[4].alive = False
+        m.sessions[10] = game
+        interaction = S(user=S(id=99), response=S(defer=AsyncMock()),
+                        followup=S(send=AsyncMock()))
+        run(m.GameView(game).callback_for("처형 투표")(interaction))
+        calls = interaction.followup.send.call_args_list
+        self.assertEqual(len(calls), 2)
+        for call, name in zip(calls, ("P1", "P3")):
+            self.assertIn(name, call.args[0])
+            self.assertTrue(call.kwargs["ephemeral"])
+            self.assertEqual([b.label for b in call.kwargs["view"].children], ["처형 찬성", "처형 반대"])
 
 
 

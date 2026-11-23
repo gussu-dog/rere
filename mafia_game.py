@@ -240,8 +240,6 @@ class Game:
         player.inbox.append(f"{self.day}일 밤 · 주사위 [{roll}] / 성공률 {rate}% · {'성공' if success else '실패'}")
         if not success:
             player.inbox.append(FAILURE_HINTS[player.role])
-        if not success:
-            player.inbox.append(FAILURE_HINTS[player.role])
         return success
 
     def resolve_night(self) -> None:

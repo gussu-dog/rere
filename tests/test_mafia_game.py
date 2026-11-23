@@ -1002,6 +1002,15 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual([b.label for b in call.kwargs["view"].children], ["처형 찬성", "처형 반대"])
 
 
+    def test_each_failed_role_check_adds_only_one_failure_hint(self):
+        for role in m.ROLE_SKILLS:
+            game = fixture([role])
+            with patch.object(m.random, "randint", return_value=100):
+                self.assertFalse(game.check(game.players[1]))
+            self.assertEqual(game.players[1].inbox.count(m.FAILURE_HINTS[role]), 1)
+            self.assertEqual(len(game.players[1].inbox), 2)
+
+
 
 class DiscussionAnnouncementTests(unittest.TestCase):
     def test_new_public_notice_has_only_current_poll_buttons(self):

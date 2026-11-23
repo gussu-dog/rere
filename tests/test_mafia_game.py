@@ -76,6 +76,9 @@ class MafiaTests(unittest.TestCase):
         self.assertIsNone(m.unique_most_voted([2, 3]))
         game.votes = {1: 1, 2: 1}
         game.resolve_vote()
+        self.assertEqual(game.phase, "최후변론")
+        game.execution_votes = {p.player_id: True for p in game.alive() if p.player_id != game.nominee}
+        game.resolve_execution()
         self.assertEqual(game.phase, "종료")
         self.assertIn("시민 진영 승리!", game.news)
 
@@ -424,6 +427,12 @@ class MafiaTests(unittest.TestCase):
             run(m.finish_phase(game, expired=True))
             self.assertEqual(game.phase, "투표")
             game.votes = {1: 2}
+            run(m.finish_phase(game, expired=True))
+            self.assertTrue(game.players[2].alive)
+            self.assertEqual(game.phase, "최후변론")
+            run(m.finish_phase(game, expired=True))
+            self.assertEqual(game.phase, "처형 투표")
+            game.execution_votes = {1: True, 3: True, 4: False}
             run(m.finish_phase(game, expired=True))
             self.assertFalse(game.players[2].alive)
             self.assertEqual(game.day, 2)
@@ -863,6 +872,42 @@ class MafiaTests(unittest.TestCase):
         run(m.update_team_windows(game, repost=True))
         self.assertIs(game.team_windows[1][1], first_new)
         first_new.edit.assert_awaited_once()
+
+    def test_defense_verdict_tie_abstention_and_same_day(self):
+        for ballots in ({1: True, 3: False}, {}):
+            game = fixture(["마피아", "경찰", "의사", "군인"])
+            game.phase = "투표"
+            game.votes = {1: 2, 2: 2, 3: 2, 4: None}
+            game.resolve_vote()
+            self.assertEqual((game.phase, game.day, game.nominee), ("최후변론", 1, 2))
+            self.assertTrue(game.players[2].alive)
+            self.assertIn("P2", game.render())
+            self.assertFalse(game.all_choices_ready())
+            game.phase = "처형 투표"
+            game.execution_votes = ballots
+            game.resolve_execution()
+            self.assertTrue(game.players[2].alive)
+            self.assertEqual((game.phase, game.day, game.nominee), ("밤", 2, None))
+
+    def test_execution_controls_reject_nominee_and_accept_owned_characters(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase, game.nominee = "처형 투표", 2
+        for p in game.players.values():
+            p.owner_id = 42
+        m.sessions[10] = game
+        interaction = S(user=S(id=42), response=S(send_message=AsyncMock(), defer=AsyncMock()),
+                        followup=S(send=AsyncMock()))
+        panel = m.GameView(game)
+        self.assertIn("처형 찬성", [b.label for b in panel.children])
+        run(panel.callback_for("처형 찬성", 2)(interaction))
+        self.assertEqual(game.execution_votes, {})
+        with patch.object(m, "refresh", AsyncMock()):
+            for pid in (1, 3):
+                run(panel.callback_for("처형 찬성", pid)(interaction))
+            self.assertFalse(game.all_choices_ready())
+            run(panel.callback_for("처형 반대", 4)(interaction))
+        self.assertFalse(game.players[2].alive)
+        self.assertEqual(game.phase, "밤")
 
 
 class TimerSchedulingTests(unittest.TestCase):

@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 
 MAFIA = {"마피아", "스파이", "해커"}
-PHASE_SECONDS = {"밤": 120, "토론": 600, "투표": 60}
+PHASE_SECONDS = {"밤": 120, "토론": 600, "투표": 60, "최후변론": 60, "처형 투표": 60}
 DESCRIPTIONS = {
     "마피아": "매일 밤 사격으로 한 명을 공격해요. 접선한 해커가 살아 있으면 공격 판정이 자동 성공해요.",
     "스파이": "경찰에게 시민으로 보여요. 밤 행동으로 한 명에게 접선을 시도해요. 성공한 대상이 마피아면 다음 밤부터 별도 공격과 팀 대화가 가능해요.",
@@ -71,6 +71,8 @@ class Game:
     actions: dict[int, int | None] = field(default_factory=dict)
     attacks: dict[int, int | None] = field(default_factory=dict)
     votes: dict[int, int | None] = field(default_factory=dict)
+    nominee: int | None = None
+    execution_votes: dict[int, bool] = field(default_factory=dict)
     news: list[str] = field(default_factory=list)
     contact_attempts: set[int] = field(default_factory=set)
     team_messages: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
@@ -217,6 +219,8 @@ class Game:
                        and (not self.can_attack(p) or p.player_id in self.attacks) for p in self.alive())
         if self.phase == "투표":
             return all(p.player_id in self.votes for p in self.alive())
+        if self.phase == "처형 투표":
+            return all(p.player_id in self.execution_votes for p in self.alive() if p.player_id != self.nominee)
         return False
 
     def success_rate(self, player: Player, *, attack: bool = False) -> int:
@@ -359,8 +363,28 @@ class Game:
         if victim is None:
             self.news.append("최다 득표가 동률이거나 모두 기권해서 처형하지 않았어요.")
         else:
-            self.players[victim].alive = False
-            self.news.append(f"{self.players[victim].name}님이 투표로 처형됐어요.")
+            self.nominee = victim
+            self.execution_votes.clear()
+            self.phase = "최후변론"
+            self.news.append(f"{self.players[victim].name}님의 최후변론을 들어 주세요.")
+            self.revision += 1
+            return
+        self.begin_next_night()
+
+    def resolve_execution(self) -> None:
+        yes = sum(self.execution_votes.values())
+        no = len(self.execution_votes) - yes
+        self.news = [f"처형 찬성 {yes} · 반대 {no}"]
+        if yes > no:
+            self.players[self.nominee].alive = False
+            self.news.append(f"{self.players[self.nominee].name}님이 투표로 처형됐어요.")
+        else:
+            self.news.append("찬성이 더 많지 않아 처형하지 않았어요.")
+        self.nominee = None
+        self.execution_votes.clear()
+        self.begin_next_night()
+
+    def begin_next_night(self) -> None:
         self.revision += 1
         if self.finish_if_decided():
             return
@@ -379,6 +403,8 @@ class Game:
             "밤": "밤이 됐어요! 다들 눈을 감고, 자기 역할에 맞는 행동을 골라 주세요!",
             "토론": "아침이 밝았어요! 레레가 밤사이 무슨 일이 있었는지 알려드릴게요!",
             "투표": "이제 투표할 시간이에요! 누가 마피아일지 신중하게 골라 주세요!",
+            "최후변론": "마지막으로 할 말을 들어볼게요! 지목된 캐릭터는 채팅으로 변론해 주세요!",
+            "처형 투표": "최후변론을 들었어요! 처형할지 결정해 주세요!",
             "종료": "마피아게임이 끝났어요! 다들 수고하셨어요!",
         }
         title = "마피아게임 | 모집 중" if self.phase == "모집" else f"마피아게임 | {self.day}일째 · {self.phase}"
@@ -407,6 +433,10 @@ class Game:
             lines.extend(["", f"밤 행동 {submitted}/{len(self.alive())}"])
         elif self.phase == "투표":
             lines.extend(["", f"투표 완료 {len(self.votes)}/{len(self.alive())}"])
+        if self.phase in {"최후변론", "처형 투표"} and self.nominee is not None:
+            lines.extend(["", f"지목된 캐릭터 · {self.players[self.nominee].name}"])
+        if self.phase == "처형 투표":
+            lines.append(f"투표 완료 {len(self.execution_votes)}/{len(self.alive()) - 1}")
         instructions = {
             "밤이 됐어요! 역할을 확인하고 밤 행동을 골라 주세요.",
             "밤이 됐어요! 밤 행동을 골라 주세요.",
@@ -421,6 +451,8 @@ class Game:
             "토론": "채팅으로 자유롭게 이야기를 나눠 주세요! 시간이 부족하면 토론 연장을 요청할 수 있어요.",
             "투표": "행동 버튼에서 캐릭터마다 한 표씩 골라 주세요! 모두 선택하면 진행하고, 시간이 끝나면 미투표는 기권으로 처리해요.",
         }
+        guides["최후변론"] = "최후변론은 1분이에요. 시간이 끝나면 처형 찬반투표를 시작할게요!"
+        guides["처형 투표"] = "지목된 캐릭터를 제외하고 한 표씩 골라 주세요. 찬성이 반대보다 많을 때만 처형하고, 미투표는 기권으로 처리해요."
         message = narration[self.phase] + "\n\n" + code_box("\n".join(lines))
         if self.phase in guides:
             message += "\n" + guides[self.phase]
@@ -566,6 +598,12 @@ async def finish_phase(game: Game, *, expired: bool = False) -> None:
             for player in game.alive():
                 game.votes.setdefault(player.player_id, None)
         game.resolve_vote()
+    elif phase == "최후변론":
+        game.phase = "처형 투표"
+        game.revision += 1
+        game.news = []
+    elif phase == "처형 투표":
+        game.resolve_execution()
     elif phase == "토론":
         game.phase = "투표"
         game.revision += 1
@@ -979,6 +1017,8 @@ class GameView(MafiaView):
             labels.insert(3, "토론 연장")
             if game.discussion_votes is not None:
                 labels.extend(["찬성", "반대"])
+        if game.phase == "처형 투표":
+            labels = ["내 단서 / 결과", "처형 찬성", "처형 반대", "게임 종료"]
         if game.phase == "종료":
             labels = []
         for label in labels:
@@ -1096,10 +1136,11 @@ class GameView(MafiaView):
                         )
                     return
                 player = game.players.get(player_id)
-                personal = {"내 역할 / 결과", "밤 행동", "마피아 공격", "투표", "접선", "팀 대화"}
+                personal = {"내 역할 / 결과", "밤 행동", "마피아 공격", "투표", "접선", "팀 대화", "처형 찬성", "처형 반대"}
                 if label in personal and player_id is None:
                     owned = [p for p in game.players.values() if p.owner_id == interaction.user.id
-                             and (label == "내 역할 / 결과" or p.alive)]
+                             and (label == "내 역할 / 결과" or p.alive)
+                             and (label not in {"처형 찬성", "처형 반대"} or p.player_id != game.nominee)]
                     if not owned:
                         await interaction.response.send_message("이 행동을 할 수 있는 참가 캐릭터가 없어요.", ephemeral=True)
                         return
@@ -1108,6 +1149,21 @@ class GameView(MafiaView):
                     return
                 if label in personal and (player is None or player.owner_id != interaction.user.id):
                     await interaction.response.send_message("본인이 참가시킨 캐릭터만 조종할 수 있어요.", ephemeral=True)
+                    return
+                if label in {"처형 찬성", "처형 반대"}:
+                    if game.phase != "처형 투표" or not player.alive or player.player_id == game.nominee:
+                        await interaction.response.send_message("지목된 캐릭터를 제외한 생존 캐릭터만 투표할 수 있어요.", ephemeral=True)
+                        return
+                    if game.deadline and time.time() >= game.deadline:
+                        await interaction.response.defer()
+                        await finish_phase(game, expired=True)
+                        return
+                    game.execution_votes[player.player_id] = label == "처형 찬성"
+                    await interaction.response.defer()
+                    await interaction.followup.send(f"{player.name} · {label}으로 투표했어요.", ephemeral=True,
+                                                    allowed_mentions=discord.AllowedMentions.none())
+                    if not await advance_if_ready(game):
+                        await refresh(game)
                     return
                 if label in {"시작", "모집 취소", "게임 종료"} and interaction.user.id != game.owner_id:
                     await interaction.response.send_message("모집한 사람만 진행할 수 있어요.", ephemeral=True)

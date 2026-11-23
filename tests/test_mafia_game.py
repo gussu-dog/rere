@@ -1011,6 +1011,22 @@ class MafiaTests(unittest.TestCase):
             self.assertEqual(len(game.players[1].inbox), 2)
 
 
+    def test_success_rate_sums_all_matching_skills_before_bonus(self):
+        game = fixture(["마피아", "경찰", "의사", "영매"])
+        cases = [
+            (1, {"사격 | 권총": 10, "사격(라/산)": 20, "관찰력": 80}, 68),
+            (2, {"추적": 10, "과학 | 수사과학": 15, "관찰력": 20, "건강": 90}, 77),
+            (3, {"응급처치": 10, "의료": 20, "의학": 10}, 74),
+            (4, {"정신": 10, "오컬트": 20}, 68),
+            (2, {"추적": 100, "관찰력": 100}, 90),
+            (2, {"추적": -20, "관찰력": 10}, 56),
+        ]
+        for pid, skills, expected in cases:
+            game.players[pid].skill_values = skills
+            self.assertEqual(game.success_rate(game.players[pid]), expected)
+        self.assertEqual(game.success_rate(game.players[1], attack=True), 68)
+
+
 
 class DiscussionAnnouncementTests(unittest.TestCase):
     def test_new_public_notice_has_only_current_poll_buttons(self):

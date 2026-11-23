@@ -16,12 +16,12 @@ DESCRIPTIONS = {
     "마피아": "매일 밤 사격으로 한 명을 공격해요. 접선한 해커가 살아 있으면 공격 판정이 자동 성공해요.",
     "스파이": "경찰에게 시민으로 보여요. 밤 행동으로 한 명에게 접선을 시도해요. 성공한 대상이 마피아면 다음 밤부터 별도 공격과 팀 대화가 가능해요.",
     "해커": "한 명을 골라요. 마피아면 접선을 시도하고, 그 외에는 능력을 방해하고, 조사 결과는 거짓 정보로 바꿔요. 접선 성공 다음 밤부터 마피아의 공격 판정을 자동 성공시켜요.",
-    "경찰": "추적·수사과학·관찰력 중 가장 높은 수치로 진영을 조사해요. 스파이는 시민으로 보여요.",
-    "의사": "응급처치·의료·의학 중 가장 높은 수치로 한 명을 보호해요. 자신도 선택할 수 있어요.",
-    "탐정": "추적·수사과학·관찰력 중 가장 높은 수치로 대상의 밤 행동 대상을 알아내요.",
+    "경찰": "추적·수사과학·관찰력 수치를 합산해 진영을 조사해요. 스파이는 시민으로 보여요.",
+    "의사": "응급처치·의료·의학 수치를 합산해 한 명을 보호해요. 자신도 선택할 수 있어요.",
+    "탐정": "추적·수사과학·관찰력 수치를 합산해 대상의 밤 행동 대상을 알아내요.",
     "기자": "자료조사로 정확한 역할을 취재해 다음 아침 공개해요. 성공은 게임 중 한 번이고 실패하면 다시 시도할 수 있어요.",
     "군인": "선택한 상대에게 들어온 공격을 한 번 대신 맞아요. 건강 기반 판정에 성공하면 버티고, 실패하면 대신 탈락해요.",
-    "영매": "정신력·오컬트 중 높은 수치로 사망자의 유언을 듣거나, 생존자가 밤에 선택했던 사망자들의 흔적을 살펴봐요.",
+    "영매": "정신력·오컬트 수치를 합산해 사망자의 유언을 듣거나, 생존자가 밤에 선택했던 사망자들의 흔적을 살펴봐요.",
 }
 ROLE_SKILLS = {
     "마피아": {"사격"}, "스파이": {"은밀행동"}, "해커": {"자료조사"},
@@ -226,8 +226,8 @@ class Game:
 
     def success_rate(self, player: Player, *, attack: bool = False) -> int:
         skills = {"사격"} if attack else ROLE_SKILLS[player.role]
-        value = max((value for name, value in player.skill_values.items()
-                     if any(part.strip() in skills for part in name.replace("(", "|").replace(")", "").split("|"))), default=0)
+        value = sum(max(0, value) for name, value in player.skill_values.items()
+                    if any(part.strip() in skills for part in name.replace("(", "|").replace(")", "").split("|")))
         return min(90, 50 + max(0, value) * 3 // 5)
 
     def check(self, player: Player, *, attack: bool = False, automatic: bool = False) -> bool:
@@ -1396,7 +1396,7 @@ def install(bot, registry) -> None:
                 "영매 [정신력/오컬트] (시민팀)",
                 "사망자의 유언 청취. 생존자 곁에 남은 사망자의 흔적 확인",
                 "",
-                "기본 50% + 기능치의 60% · 최대 90%",
+                "기본 50% + 참조 기능치 합계의 60% · 최대 90%",
                 "스파이와 해커는 마피아와 접선하면 추가능력이 해금됩니다.",
             ]
             await interaction.response.send_message(

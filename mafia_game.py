@@ -1035,14 +1035,21 @@ def install(bot, registry) -> None:
                                app_commands.Choice(name="직업설명", value="roles")])
     async def mafia_game(interaction: discord.Interaction, mode: app_commands.Choice[str]) -> None:
         if mode.value == "roles":
-            lines = ["마피아게임 직업 설명", "기본 성공률 30% + 참조 수치 × 0.6 · 최대 90%", ""]
-            for role, description in DESCRIPTIONS.items():
-                skills = "캐릭터가 가진 사격 중 최고값" if role == "마피아" else "·".join(sorted(ROLE_SKILLS[role])) + " 중 최고값"
-                lines.extend([f"{role} · {skills}", description, ""])
-            lines.extend(["접선은 성공한 대상이 마피아일 때 완료돼요. 새 능력과 팀 대화는 다음 밤부터 가능해요.",
-                          "밤 2분 · 토론 3분 · 투표 1분. 미선택 밤 행동은 무작위, 미투표는 기권이에요."])
+            lines = [
+                "마피아 [사격] 한 명 공격",
+                "스파이 [은밀행동] 경찰에게 시민으로 보임. 접선 후 추가 공격",
+                "해커 [자료조사] 능력 방해. 접선 후 마피아 공격 자동 성공",
+                "경찰 [추적/수사과학/관찰력] 진영 조사",
+                "의사 [응급처치/의료/의학] 한 명 보호. 자신도 가능",
+                "탐정 [추적/수사과학/관찰력] 행동 대상 추적",
+                "기자 [자료조사] 정확한 역할 공개. 성공은 1회",
+                "군인 [건강] 밤 공격 버티기. 성공은 1회",
+                "",
+                "기능은 가장 높은 값 사용. 성공률 30 + 기능치×0.6, 최대 90%",
+                "접선: 마피아를 골라 판정 성공 → 다음 밤부터 능력·팀 대화",
+            ]
             await interaction.response.send_message(
-                "레레가 마피아게임 직업을 설명해드릴게요!\n\n" + code_box("\n".join(lines)),
+                "직업별로 짧게 알려드릴게요!\n\n" + code_box("\n".join(lines)),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return

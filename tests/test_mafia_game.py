@@ -951,6 +951,32 @@ class MafiaTests(unittest.TestCase):
         self.assertNotIn("진짜 유언", game.players[2].inbox[-1])
 
 
+    def test_vote_tally_is_anonymous_and_survives_defense_and_execution(self):
+        game = fixture(["마피아", "경찰", "의사", "군인"])
+        game.phase = "투표"
+        game.votes = {1: 2, 2: 3, 3: 2}
+        game.resolve_vote()
+        self.assertEqual(game.vote_summary, ["P2 · 2표", "P3 · 1표", "P1 · 0표", "P4 · 0표", "기권 · 1표"])
+        self.assertIn("득표 결과", game.render())
+        with patch.object(m, "refresh", AsyncMock()):
+            run(m.finish_phase(game, expired=True))
+        self.assertIn("P2 · 2표", game.render())
+        game.execution_votes = {1: False, 3: False, 4: False}
+        game.resolve_execution()
+        self.assertIn("P2 · 2표", game.render())
+        game.resolve_night()
+        self.assertEqual(game.vote_summary, [])
+
+    def test_tied_and_abstained_votes_also_show_tallies(self):
+        for votes in ({1: 2, 2: 1}, {1: None, 2: None}):
+            game = fixture(["마피아", "경찰", "의사", "군인"])
+            game.votes = votes
+            game.resolve_vote()
+            self.assertEqual(game.phase, "밤")
+            self.assertIn("득표 결과", game.render())
+            self.assertEqual(len(game.vote_summary), 5)
+
+
 
 class TimerSchedulingTests(unittest.TestCase):
     def test_new_phase_replaces_timer_and_end_cancels_it(self):

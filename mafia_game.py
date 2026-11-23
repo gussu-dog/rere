@@ -71,6 +71,7 @@ class Game:
     actions: dict[int, int | None] = field(default_factory=dict)
     attacks: dict[int, int | None] = field(default_factory=dict)
     votes: dict[int, int | None] = field(default_factory=dict)
+    vote_summary: list[str] = field(default_factory=list)
     nominee: int | None = None
     execution_votes: dict[int, bool] = field(default_factory=dict)
     news: list[str] = field(default_factory=list)
@@ -244,6 +245,7 @@ class Game:
         return success
 
     def resolve_night(self) -> None:
+        self.vote_summary.clear()
         active = {p.player_id for p in self.alive()}
         for actor in self.invalid_selections & active:
             self.players[actor].inbox.append(FAILURE_HINTS[self.players[actor].role])
@@ -369,7 +371,12 @@ class Game:
         self.finish_if_decided()
 
     def resolve_vote(self) -> None:
+        counts = Counter(v for v in self.votes.values() if v is not None)
         victim = unique_most_voted([v for v in self.votes.values() if v is not None])
+        self.vote_summary = [f"{p.name} · {counts[p.player_id]}표" for p in
+                             sorted(self.alive(), key=lambda p: -counts[p.player_id])]
+        abstentions = sum(self.votes.get(p.player_id) is None for p in self.alive())
+        self.vote_summary.append(f"기권 · {abstentions}표")
         self.news = []
         if victim is None:
             self.news.append("최다 득표가 동률이거나 모두 기권해서 처형하지 않았어요.")
@@ -448,6 +455,8 @@ class Game:
             lines.extend(["", f"지목된 캐릭터 · {self.players[self.nominee].name}"])
         if self.phase == "처형 투표":
             lines.append(f"투표 완료 {len(self.execution_votes)}/{len(self.alive()) - 1}")
+        if self.vote_summary:
+            lines.extend(["", "득표 결과", *self.vote_summary])
         instructions = {
             "밤이 됐어요! 역할을 확인하고 밤 행동을 골라 주세요.",
             "밤이 됐어요! 밤 행동을 골라 주세요.",
